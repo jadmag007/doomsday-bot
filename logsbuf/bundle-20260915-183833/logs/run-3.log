@@ -1,0 +1,21 @@
+18:37:42 INFO telethon.crypto.aes: libssl detected, it will be used for encryption
+18:37:42 INFO telethon.network.mtprotosender: Connecting to 149.154.167.51:443/TcpFull...
+18:37:42 INFO telethon.network.mtprotosender: Connection to 149.154.167.51:443/TcpFull complete!
+18:37:50 INFO telethon.network.mtprotosender: Disconnecting from 149.154.167.51:443/TcpFull...
+18:37:50 INFO telethon.network.mtprotosender: Disconnection from 149.154.167.51:443/TcpFull complete!
+{
+  "ok": false,
+  "steps": [
+    {
+      "name": "chat:/start",
+      "status": "ok",
+      "detail": "Отправлен /start боту"
+    },
+    {
+      "name": "rebootProduction",
+      "status": "fail",
+      "detail": "HTTP 403: {\"error\":{\"details\":{\"status\":418},\"message\":\"Expired session\",\"status\":\"PERMISSION_DENIED\"}}"
+    }
+  ],
+  "notes": []
+}
