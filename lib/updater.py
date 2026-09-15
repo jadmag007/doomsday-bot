@@ -67,7 +67,7 @@ def _sha256(path: str) -> str:
 def _executables() -> list:
     return [
         os.path.join("bin", "doomsday"), "install.sh", "update.sh", "uninstall.sh",
-        os.path.join("service", "run"), os.path.join("boot", "doomsday-boot.sh"),
+        "start.sh", os.path.join("service", "run"), os.path.join("boot", "doomsday-boot.sh"),
     ]
 
 

@@ -27,7 +27,7 @@ LOCK_PATH = os.path.join(APP_DIR, "worker.lock")
 # Каталоги кода, которые заменяет обновление (всё остальное — пользовательские данные)
 CODE_ENTRIES = (
     "lib", "web", "bin", "boot", "service",
-    "install.sh", "update.sh", "uninstall.sh",
+    "install.sh", "update.sh", "uninstall.sh", "start.sh", ".gitignore",
     "README.md", "VERSION", "requirements.txt",
 )
 
