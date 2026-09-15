@@ -1,0 +1,12 @@
+✔ Конфигурация валидна: OK
+✔ Файл сессии Telegram: есть
+✔ termux-notification: доступен
+✔ Веб-панель: http://127.0.0.1:8080
+19:20:22 INFO telethon.crypto.aes: libssl detected, it will be used for encryption
+19:20:22 INFO telethon.network.mtprotosender: Connecting to 149.154.167.51:443/TcpFull...
+19:20:22 INFO telethon.network.mtprotosender: Connection to 149.154.167.51:443/TcpFull complete!
+✔ Бот игры доступен: @DoomsDayTyrannybot
+✔ Mini App (webview URL): https://telegram-miracle-f1779.web.app
+✔ TMA API шаги: встроенный пресет Doomsday (base_url: https://us-central1-telegram-miracle-f1779.cloudfunctions.net)
+19:20:23 INFO telethon.network.mtprotosender: Disconnecting from 149.154.167.51:443/TcpFull...
+19:20:23 INFO telethon.network.mtprotosender: Disconnection from 149.154.167.51:443/TcpFull complete!
