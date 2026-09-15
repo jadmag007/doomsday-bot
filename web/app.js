@@ -191,14 +191,40 @@ function pctOf(leftSec, totalSec) {
 function renderEvents(el, events) {
   if (!el) return;
   if (!events.length) { el.innerHTML = `<div class="muted">Пока пусто</div>`; return; }
-  el.innerHTML = events.map(e => `
-    <div class="ev ${e.severity}">
-      <div class="ev-time">${fmtTs(e.ts)}</div>
-      <div>
-        <div class="ev-title">${esc(e.title)}</div>
-        ${e.body ? `<div class="ev-body">${esc(String(e.body).slice(0, 400))}</div>` : ""}
-      </div>
-    </div>`).join("");
+  el.innerHTML = events.map(e => evHtml(e)).join("");
+  markClampables(el);
+}
+
+/* Длинные тексты событий (сводка дня, отчёты обмена) раньше резались
+   CSS-ом (max-height + overflow:hidden) и slice(0,400) — часть текста
+   была просто не видна (15.09 20:05: «сводка не умещается во фрейм»).
+   Теперь текст хранится целиком, а сворачивается визуально: у обрезанного
+   блока появляется кнопка «ещё…», разворачивающая его до конца.
+   Развёрнутое состояние переживает 30-секундное обновление панели (по ts). */
+const EV_OPEN = new Set();
+
+function markClampables(root) {
+  (root || document).querySelectorAll(".ev-body:not(.marked)").forEach(el => {
+    el.classList.add("marked");
+    if (el.scrollHeight <= el.clientHeight + 4) return;
+    el.classList.add("clamp");
+    const ts = el.dataset.ts || "";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "ev-more";
+    const sync = () => {
+      const open = el.classList.contains("open");
+      btn.textContent = open ? "свернуть" : "ещё…";
+    };
+    btn.addEventListener("click", () => {
+      const open = el.classList.toggle("open");
+      if (ts) { open ? EV_OPEN.add(ts) : EV_OPEN.delete(ts); }
+      sync();
+    });
+    if (ts && EV_OPEN.has(ts)) el.classList.add("open");
+    sync();
+    el.after(btn);
+  });
 }
 
 /* ================= ресурсы: состояние + выбор для уведомлений ================= */
@@ -373,8 +399,9 @@ function renderExLast(items, el) {
     <div class="ev info">
       <div class="ev-time">${fmtTs(e.ts)}</div>
       <div><div class="ev-title">${esc(e.title)}</div>
-      ${e.body ? `<div class="ev-body">${esc(String(e.body).slice(0, 220))}</div>` : ""}</div>
+      ${e.body ? `<div class="ev-body" data-ts="${esc(e.ts || "")}">${esc(String(e.body).slice(0, 4000))}</div>` : ""}</div>
     </div>`).join("");
+  markClampables(el);
 }
 
 $("save-exchange").addEventListener("click", async () => {
@@ -631,7 +658,10 @@ async function loadJournal() {
     const kind = $("event-kind").value;
     const evs = await api(`/api/events?limit=30&offset=${evOffset}${kind ? "&kind=" + encodeURIComponent(kind) : ""}`);
     if (evOffset === 0) renderEvents($("journal-events"), evs);
-    else $("journal-events").insertAdjacentHTML("beforeend", evs.map(e => evHtml(e)).join(""));
+    else {
+      $("journal-events").insertAdjacentHTML("beforeend", evs.map(e => evHtml(e)).join(""));
+      markClampables($("journal-events"));
+    }
     const runs = await api("/api/runs");
     renderRuns(runs);
     const lg = await api("/api/log?lines=200");
@@ -642,7 +672,7 @@ function evHtml(e) {
   return `<div class="ev ${e.severity}">
     <div class="ev-time">${fmtTs(e.ts)}</div>
     <div><div class="ev-title">${esc(e.title)}</div>
-    ${e.body ? `<div class="ev-body">${esc(String(e.body).slice(0, 400))}</div>` : ""}</div>
+    ${e.body ? `<div class="ev-body" data-ts="${esc(e.ts || "")}">${esc(String(e.body).slice(0, 4000))}</div>` : ""}</div>
   </div>`;
 }
 $("events-more").addEventListener("click", () => { evOffset += 30; loadJournal(); });

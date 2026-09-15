@@ -279,7 +279,7 @@ def cmd_cron(args) -> int:
     print(f"[cron] {db.now_iso()} план: {actions or 'ничего не подошло'}")
     for name in actions:
         try:
-            r = _run_action(cfg, name)
+            r = _run_action_logged(cfg, name)
             if r.get("ok", True):
                 db.kv_set(f"last_fail_{name}", None)
             else:
@@ -289,6 +289,7 @@ def cmd_cron(args) -> int:
             log.exception("Действие %s провалилось: %s", name, e)
             notify_mod.notify_error(cfg, f"Ошибка: {name}", str(e)[:300])
             db.kv_set("last_error_ts", db.now_iso())
+    _prune_run_logs()
     return 0
 
 
@@ -300,6 +301,52 @@ def _run_action(cfg, name: str) -> dict:
     if name == "summary":
         return engine.run_coro(engine.action_summary(cfg))
     raise ValueError(f"Неизвестное действие: {name}")
+
+
+def _run_action_logged(cfg, name: str) -> dict:
+    """Действие cron-прохода с журналированием результата в run-<id>.log.
+
+    Раньше run-логи писали только действия из веб-панели: cron-проходы
+    оставляли лишь план в cron.log, и по свежим логам устройства не было
+    видно, что именно скан продал и что ответил сервер (диагностика 15.09
+    20:05 — обмен состоялся, но его JSON-результат нигде не сохранился).
+    Теперь каждый cron-скан/ребут/сводка пишет тот же run-лог, что и
+    ручные запуски: он и в панели (Запуски), и в бандлах logs-push.
+    """
+    rid = db.run_start(f"cron:{name}")
+    log_path = os.path.join(paths.LOG_DIR, f"run-{rid}.log")
+    try:
+        r = _run_action(cfg, name)
+        ok = bool(r.get("ok", True))
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(r, ensure_ascii=False, indent=2, default=str))
+        except OSError:
+            pass
+        db.run_finish(rid, "ok" if ok else "fail",
+                      json.dumps(r, ensure_ascii=False, default=str)[:16000])
+        return r
+    except Exception as e:
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(f"провалено: {e!r}\n")
+        except OSError:
+            pass
+        db.run_finish(rid, "fail", repr(e)[:2000])
+        raise
+
+
+def _prune_run_logs(keep: int = 20) -> None:
+    """Держать только последние `keep` run-*.log — теперь их пишут и cron-проходы,
+    без пруна бандлы logs-push разбухнут."""
+    import glob as _glob
+    try:
+        files = sorted(_glob.glob(os.path.join(paths.LOG_DIR, "run-*.log")),
+                       key=lambda p: os.path.getmtime(p) if os.path.isfile(p) else 0)
+        for p in files[:-keep] if len(files) > keep else []:
+            os.unlink(p)
+    except OSError:
+        pass
 
 
 # ---------------- отдельные команды ----------------
@@ -319,8 +366,11 @@ def cmd_exchange(args) -> int:
     if ex:
         print("Продано:")
         for x in ex:
+            extra = (f", запрошено: {x['requested']:g}"
+                     if x.get("requested") is not None and (x.get("requested") or 0) - (x.get("amount") or 0) >= 1
+                     else "")
             print(f"  - {x['name']} ×{x['amount']:g} → {x['proceeds']} "
-                  f"(остаток: {x['left']:g}, баланс: {x['balance_ru']})")
+                  f"(остаток: {x['left']:g}, баланс: {x['balance_ru']}{extra})")
     else:
         print("По правилам обмена продавать нечего.")
     print(json.dumps({"ok": r.get("ok"), "resources": len(r.get("resources") or [])},
@@ -766,6 +816,72 @@ def cmd_selftest(args) -> int:
                                                     and merged[0]["current"] == 7
                                                     and merged[0].get("id") == "alloy1",
                                                     str(merged)))
+
+            print("selftest: диагностика логов (регрессия 15.09 20:05)")
+            # cron-проходы обязаны оставлять run-лог с JSON-результатом
+            old_log_dir, old_rep_dir = paths.LOG_DIR, paths.REPORTS_DIR
+            paths.LOG_DIR = os.path.join(tmp, "logs")
+            paths.REPORTS_DIR = os.path.join(tmp, "reports")
+            os.makedirs(paths.LOG_DIR, exist_ok=True)
+            os.makedirs(paths.REPORTS_DIR, exist_ok=True)
+            orig_ra = globals()["_run_action"]
+            globals()["_run_action"] = lambda cfg, name: {"ok": True, "probe": name}
+            try:
+                r = _run_action_logged({}, "scan")
+                _rid = db.runs_list(limit=1)[0]["id"]
+                _lp = os.path.join(paths.LOG_DIR, f"run-{_rid}.log")
+                check("cron-действие пишет run-лог с JSON",
+                      lambda: (r.get("probe") == "scan"
+                               and os.path.isfile(_lp)
+                               and '"probe": "scan"' in open(_lp, encoding="utf-8").read(),
+                               _lp))
+                _run = db.runs_list(limit=1)[0]
+                check("запуск числится в журнале запусков",
+                      lambda: (_run["action"] == "cron:scan" and _run["status"] == "ok", str(_run)))
+                globals()["_run_action"] = lambda cfg, name: (_ for _ in ()).throw(RuntimeError("boom"))
+                try:
+                    _run_action_logged({}, "scan")
+                    _raised = False
+                except RuntimeError:
+                    _raised = True
+                check("исключение действия фиксируется как fail",
+                      lambda: (_raised and db.runs_list(limit=1)[0]["status"] == "fail",
+                               str(db.runs_list(limit=1)[0])))
+            finally:
+                globals()["_run_action"] = orig_ra
+            # прун run-логов и очистка отправленного — в чистом каталоге
+            paths.LOG_DIR = os.path.join(tmp, "logs2")
+            os.makedirs(paths.LOG_DIR, exist_ok=True)
+            import glob as _glob
+            for i in range(25):
+                p = os.path.join(paths.LOG_DIR, f"run-{900 + i}.log")
+                with open(p, "w") as f:
+                    f.write("x")
+                os.utime(p, (1700000000 + i, 1700000000 + i))
+            _prune_run_logs()
+            check("прун оставляет последние 20 run-логов",
+                  lambda: (len(_glob.glob(os.path.join(paths.LOG_DIR, "run-*.log"))) == 20, ""))
+            from . import logspush as _lpm
+            _old = os.path.join(paths.LOG_DIR, "bot.log")
+            with open(_old, "w") as f:
+                f.write("старые строки")
+            os.utime(_old, (1700000000, 1700000000))  # давно менялся
+            _new = os.path.join(paths.LOG_DIR, "cron.log")
+            with open(_new, "w") as f:
+                f.write("свежее")
+            _rep = os.path.join(paths.REPORTS_DIR, "discovery-x.json")
+            with open(_rep, "w") as f:
+                f.write("{}")
+            os.utime(_rep, (1700000000, 1700000000))
+            cleared = _lpm._clear_pushed_logs({"logs": ["bot.log", "cron.log"],
+                                               "reports": ["discovery-x.json"]})
+            check("отправленный старый лог обрезан",
+                  lambda: (os.path.getsize(_old) == 0 and cleared == 1, str(cleared)))
+            check("недавно менявшийся лог не тронут",
+                  lambda: (os.path.getsize(_new) > 0, ""))
+            check("отправленный старый отчёт удалён",
+                  lambda: (not os.path.isfile(_rep), ""))
+            paths.LOG_DIR, paths.REPORTS_DIR = old_log_dir, old_rep_dir
 
             print("selftest: ребут по циклу и фильтр уведомлений")
             import time as _time

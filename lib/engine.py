@@ -258,70 +258,170 @@ def _fmt_proceeds(rid: str, amount: float) -> str:
     return "+" + game_data.fmt_bytes(total)
 
 
+def _fmt_gain(value: float, is_ddt: bool) -> str:
+    """Фактическая прибавка валюты из ответа сервера (дельта баланса)."""
+    from . import game_data
+    if is_ddt:
+        return "+" + f"{value:,.2f}".replace(",", " ").rstrip("0").rstrip(".") + " DDT"
+    return "+" + game_data.fmt_bytes(value)
+
+
+def _sell_pause(cfg: dict, seed: str) -> None:
+    """Пауза между вызовами sellItem (джиттер 0.4–1.6 с). Отдельная функция —
+    чтобы тесты подменяли её и не ждали по-настоящему."""
+    import time as _time
+    from . import timing as timing_mod
+    _time.sleep(timing_mod.sell_pause_sec(cfg, seed))
+
+
 async def _auto_exchange(cfg: dict, resources: list, ctx: dict, timeout: int) -> list:
     """Продать ресурсы по правилам через sellItem. Обновляет resources на месте.
 
-    Возвращает список отчётов [{rid, name, amount, proceeds, balance, left}],
-    либо [] если обменивать нечего/обмен выключен. Ошибки — событие в журнал
-    и уведомление, скан в целом не проваливается.
+    Возвращает список отчётов [{rid, name, requested, amount, proceeds,
+    proceeds_real, balance, balance_ru, left, attempts}], либо [] если
+    обменивать нечего/обмен выключен. Ошибки — событие в журнал и
+    уведомление, скан в целом не проваливается.
+
+    Все цифры в отчётах — ФАКТИЧЕСКИЕ (диагностика 15.09 20:05: в сообщении
+    «×N» стоял запланированный объём, а по факту со склада ушло заметно
+    меньше; баланс из ответа при этом был верный). Поэтому:
+      * amount   = сколько реально продано: count_before − resourceCount
+                   из ответа сервера (НЕ запрошенное количество);
+      * proceeds = дельта баланса валюты из ответа (fallback: amount × цена,
+                   помечается как оценка);
+      * частичная продажа добирается повторными sellItem (до 3 вызовов),
+        пока остаток выше цели keep и продажи продолжают прогрессировать;
+      * если сервер продал меньше запрошенного — в событие пишется сырой
+        ответ, чтобы необычное поведение сервера было видно сразу.
     """
-    import time as _time
     from . import game_data
+
     plan = _exchange_plan(cfg, resources)
     if not plan:
         return []
     reports, errors = [], []
+    # балансы ДО продаж — база для расчёта фактической выручки по дельте
+    prev_coin = ctx.get("balance_coin")
+    prev_mcoin = ctx.get("balance_mcoin")
+    MAX_ATTEMPTS = 3
     for rid, amount, rule in plan:
         unit = game_data.sell_unit(rid)
         name = game_data.ru_name(rid, rid)
-        outcome = tma.run_steps(tma.exchange_steps(rid, amount), dict(ctx), timeout=timeout)
-        ok = outcome["ok"]
-        res = outcome["ctx"]
-        if ok and res.get("sell_left") is None:
-            ok = False  # 200, но без result — считаем ошибкой
-        if not ok:
-            detail = "; ".join(f"{s['name']}: {s['detail']}" for s in outcome["results"] if s["status"] == "fail") \
-                     or (res.get("sell_raw") or "")[:200]
-            errors.append(f"{name} ×{amount:g}: {detail}")
-            break  # auth мог протухнуть — остальные продажи тем же контекстом бессмысленны
-        left = res.get("sell_left")
-        # обновляем balances и состояние ресурса на месте
-        if res.get("sell_coin") is not None:
-            db.kv_set("balance_coin", res["sell_coin"])
-        if res.get("sell_mcoin") is not None:
-            db.kv_set("balance_mcoin", res["sell_mcoin"])
+        try:
+            keep = max(0.0, float(rule.get("keep") or 0))
+        except (TypeError, ValueError):
+            keep = 0.0
+        row = None
         for r in resources:
             if (r.get("id") or game_data.rid_by_name(r.get("name"))) == rid:
-                r["current"] = left
-                if r.get("max"):
-                    r["pct"] = round(left / r["max"] * 100, 1)
-                if (r.get("state") or "").startswith("склад переполнен"):
-                    r["state"] = ""
+                row = r
                 break
-        balance = res.get("sell_mcoin") if unit[1] else res.get("sell_coin")
+        count_before = (row or {}).get("current")
+        sold, left, attempts = 0.0, None, 0
+        coin_now = mcoin_now = None
+        raw_tail = ""
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            attempts = attempt
+            asked = amount if attempt == 1 else round(left - keep, 3)
+            if asked <= 0:
+                break
+            outcome = tma.run_steps(tma.exchange_steps(rid, asked), dict(ctx), timeout=timeout)
+            ok = outcome["ok"]
+            res = outcome["ctx"]
+            if ok and res.get("sell_left") is None:
+                ok = False  # 200, но без result — считаем ошибкой
+            if not ok:
+                detail = "; ".join(f"{s['name']}: {s['detail']}" for s in outcome["results"]
+                                   if s["status"] == "fail") \
+                         or (res.get("sell_raw") or "")[:200]
+                errors.append(f"{name} ×{asked:g}: {detail}")
+                break  # auth мог протухнуть — остальные продажи тем же контекстом бессмысленны
+            prev_left, left = left, res.get("sell_left")
+            coin_now, mcoin_now = res.get("sell_coin"), res.get("sell_mcoin")
+            raw_tail = (res.get("sell_raw") or "")[-260:]
+            base = count_before if attempt == 1 else prev_left
+            step = (base - left) if (base is not None and left is not None) else None
+            if step is None or step < 0:
+                step = 0.0  # остаток вырос — сервер ничего не списал
+            sold += step
+            shortfall = (left - keep) if left is not None else 0.0
+            if shortfall < 1.0 or step <= 0:
+                break  # цель достигнута / дробный осадок / продажи не идут
+            _sell_pause(cfg, f"{rid}:{attempt}")
+        if left is None:
+            continue  # продажа не состоялась — ошибка уже в errors
+
+        # обновляем balances и состояние ресурса на месте
+        if coin_now is not None:
+            db.kv_set("balance_coin", coin_now)
+        if mcoin_now is not None:
+            db.kv_set("balance_mcoin", mcoin_now)
+        if row is not None:
+            row["current"] = left
+            if row.get("max"):
+                row["pct"] = round(left / row["max"] * 100, 1)
+            if (row.get("state") or "").startswith("склад переполнен"):
+                row["state"] = ""
+
+        # фактическая выручка — по дельте баланса из ответа сервера
+        is_ddt = bool(unit[1]) if unit else False
+        if is_ddt:
+            prev_bal, bal_now = prev_mcoin, mcoin_now
+        else:
+            prev_bal, bal_now = prev_coin, coin_now
+        delta = (bal_now - prev_bal) if (bal_now is not None and prev_bal is not None) else None
+        sold = round(sold, 3)
+        if sold <= 0:
+            proceeds, proceeds_real = "нет", False
+        elif delta is not None and delta >= 0:
+            proceeds, proceeds_real = _fmt_gain(delta, is_ddt), True
+        else:
+            proceeds, proceeds_real = _fmt_proceeds(rid, sold), False
+        if bal_now is not None:
+            prev_coin, prev_mcoin = coin_now, mcoin_now
         balance_ru = "?"
-        if balance is not None:
-            balance_ru = f"{balance:g} DDT" if unit[1] else game_data.fmt_bytes(balance)
+        if bal_now is not None:
+            balance_ru = f"{bal_now:g} DDT" if is_ddt else game_data.fmt_bytes(bal_now)
         reports.append({
-            "rid": rid, "name": name, "amount": amount,
-            "proceeds": _fmt_proceeds(rid, amount),
-            "balance": balance,
-            "balance_ru": balance_ru,
-            "left": left,
+            "rid": rid, "name": name,
+            "requested": amount,          # сколько собирались продать
+            "amount": sold,               # сколько реально продано (по ответу)
+            "proceeds": proceeds, "proceeds_real": proceeds_real,
+            "balance": bal_now, "balance_ru": balance_ru,
+            "left": left, "attempts": attempts,
         })
-        db.event("exchange", f"Продано: {name}",
-                 f"{name} ×{amount:g} → {reports[-1]['proceeds']} "
-                 f"(остаток: {left:g}, режим: {'при заполнении' if rule.get('mode') == 'cap' else 'сразу'})")
-        from . import timing as timing_mod
-        _time.sleep(timing_mod.sell_pause_sec(cfg, f"{rid}:{amount:g}"))  # пауза без одинаковых значений
+        partial = (left - keep) >= 1.0 or sold <= 0
+        mode_ru = "при заполнении" if rule.get("mode") == "cap" else "сразу"
+        if sold > 0:
+            head = f"продано {sold:g}"
+            if partial:
+                head += f" из {amount:g}"
+            body = f"{head} → {proceeds} (остаток: {left:g}, режим: {mode_ru})"
+            title = f"Продано: {name}"
+        else:
+            body = (f"сервер не списал ресурс (запрошено {amount:g}, остаток {left:g}, "
+                    f"режим: {mode_ru})")
+            title = f"Обмен не прошёл: {name}"
+        if not proceeds_real and sold > 0:
+            body += "  [выручка оценена по количеству]"
+        if partial and raw_tail:
+            body += f"\nответ сервера: {raw_tail}"
+        db.event("exchange", title, body, severity="warn" if partial else "info")
+        if not partial:
+            _sell_pause(cfg, f"{rid}:done")
     if errors:
         db.event("exchange", "Автообмен: ошибка", "\n".join(errors)[:1000], severity="critical")
         notify_mod.notify_error(cfg, "Автообмен не удался", "\n".join(errors)[:300])
     if reports and cfg.get("notify", {}).get("events", {}).get("exchange_report", True):
-        lines = [f"{x['name']} ×{x['amount']:g} → {x['proceeds']} (баланс: {x['balance_ru']})"
-                 for x in reports]
+        lines = []
+        for x in reports:
+            ln = f"{x['name']} ×{x['amount']:g} → {x['proceeds']} (баланс: {x['balance_ru']})"
+            req, amt = x.get("requested"), x.get("amount") or 0
+            if req is not None and req - amt >= 1:
+                ln += f" — продано меньше запрошенного ({req:g})"
+            lines.append(ln)
         notify_mod.notify(cfg, "exchange_report", "Автообмен выполнен",
-                          "\n".join(lines)[:400], open_game=False)
+                          "\n".join(lines)[:600], open_game=False)
     return reports
 
 

@@ -200,6 +200,9 @@ main { max-width: 860px; margin: 0 auto; padding: .9rem .75rem; }
 .ev-time { font-family: var(--mono); color: var(--muted); font-size: .72rem; }
 .ev-title { font-weight: 600; }
 .ev-body { color: var(--muted); font-size: .75rem; margin-top: .15rem; word-break: break-word; white-space: pre-wrap; max-height: 7.5em; overflow: hidden; }
+.ev-body.open { max-height: none; overflow: visible; }
+.ev-more { appearance: none; background: none; border: none; padding: .1rem 0 0; margin: 0; color: var(--gold); font-size: .72rem; font-family: inherit; font-weight: 600; cursor: pointer; text-decoration: underline dotted; }
+.ev-more:active { opacity: .7; }
 
 /* ---------- формы ---------- */
 .form-grid { display: grid; grid-template-columns: 1fr; gap: .7rem; margin: .7rem 0; }

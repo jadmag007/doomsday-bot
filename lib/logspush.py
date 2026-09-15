@@ -8,8 +8,11 @@
     исходников (тоже в .gitignore), коммитит их в ОТДЕЛЬНУЮ ветку `logs`
     и пушит в GitHub; основная ветка (main) остаётся чистой — код и логи
     не смешиваются;
-  - после успешного пуша локальный logsbuf/ удаляется — ветка logs служит
-    чисто буфером передачи: с устройства → в репозиторий → к разработчику.
+  - после успешного пуша: локальный logsbuf/ удаляется, а ОТПРАВЛЕННЫЕ
+    логи обрезаются, отчёты удаляются (v2.4.3) — каждая следующая выгрузка
+    несёт только записи, накопившиеся после предыдущей, и не путается со
+    старыми; разобранные ассистентом бандлы он переносит в archive/ той же
+    ветки logs — в корне ветки всегда только неразобранное.
 
 Механика коммита без касания рабочего каталога: временный GIT_INDEX_FILE
 (read-tree → git add -f logsbuf/… → write-tree → commit-tree → push).
@@ -152,6 +155,49 @@ def _prune_old_bundles(keep: int = 3) -> None:
         pass
 
 
+def _clear_pushed_logs(manifest: dict) -> int:
+    """После успешного пуша: обрезать отправленные логи, удалить отправленные
+    отчёты. Каждый бандл несёт ХВОСТ текущих логов — без очистки утренние
+    записи повторялись бы в каждой выгрузке и путались с новыми (просьба
+    владельца 15.09: «чтобы с новыми выгрузками не путались»).
+
+    Безопасность: все писатели логов открывают файлы в append-режиме
+    (RotatingFileHandler bot.log, шелл-редирект cron.log/web.log), поэтому
+    обрезка на месте (open 'w') корректна — следующие записи пойдут с нуля.
+    Файлы, менявшиеся за последние 5 минут, не трогаем: вдруг идёт запись
+    (например, активный run-лог из панели). Возвращает число обрезанных.
+    """
+    import time as _t
+    now = _t.time()
+    cleared = 0
+    for fname in manifest.get("logs") or []:
+        p = os.path.join(paths.LOG_DIR, fname)
+        try:
+            if not os.path.isfile(p) or now - os.path.getmtime(p) < 300:
+                continue
+            with open(p, "w", encoding="utf-8"):
+                pass  # обрезка на месте; append-писатели продолжат с нуля
+            cleared += 1
+        except OSError:
+            pass
+    for fname in manifest.get("reports") or []:
+        p = os.path.join(paths.REPORTS_DIR, fname)
+        try:
+            if os.path.isfile(p) and now - os.path.getmtime(p) >= 300:
+                os.unlink(p)
+        except OSError:
+            pass
+    # прун старых run-логов (их пишут и cron-проходы с v2.4.3)
+    try:
+        files = sorted(glob.glob(os.path.join(paths.LOG_DIR, "run-*.log")),
+                       key=lambda p: os.path.getmtime(p) if os.path.isfile(p) else 0)
+        for p in files[:-20] if len(files) > 20 else []:
+            os.unlink(p)
+    except OSError:
+        pass
+    return cleared
+
+
 # ---------------- git-механика: коммит в ветку logs ----------------
 
 def _fetch_tip() -> str:
@@ -244,14 +290,18 @@ def push_logs(message: str = "") -> dict:
         result["hint"] = "не удалось push: проверьте сеть и авторизацию (doomsday git-auth)"
         return result
 
-    # успех: локальный буфер чистим — данные теперь в репозитории
+    # успех: локальный буфер чистим — данные теперь в репозитории;
+    # отправленные логи обрезаем, чтобы следующая выгрузка содержала
+    # только новое (старье уже в ветке logs и не должно повторяться)
     shutil.rmtree(bundle_dir, ignore_errors=True)
+    cleared = _clear_pushed_logs(manifest)
     result.update({
         "ok": True, "branch": LOGS_BRANCH, "path": bundle_rel,
         "commit": commit,
         "files": {"logs": manifest["logs"], "reports": len(manifest["reports"]),
                   "config": manifest["config"]},
         "bytes": manifest["bytes"],
+        "logs_cleared": cleared,
     })
     db.event("logs-push", "Логи выгружены в git",
              json.dumps({"branch": LOGS_BRANCH, "commit": commit[:12],
@@ -267,7 +317,8 @@ def cmd_logs_push(args) -> int:
             f"{res['bytes'] / 1024:.1f} КБ)")
         _say(f"Коммит: {res['commit'][:12]}  Путь: {res['path']}")
         _say("Скажите ассистенту — он заберёт логи из ветки logs и разберёт их.")
-        _say("Локальная копия удалена (буфер чист).")
+        _say(f"Отправленные логи очищены на устройстве ({res.get('logs_cleared', 0)} шт.) — "
+             "следующая выгрузка будет содержать только новое.")
         return 0
     print(f"✘ Выгрузка не удалась: {res.get('error')}")
     if res.get("hint"):
