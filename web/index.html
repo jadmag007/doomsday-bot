@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Doomsday Tyranny Bot</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ===== PIN-вход ===== -->
+<div id="pin-overlay" class="overlay hidden">
+  <div class="pin-card">
+    <div class="pin-title">⛔ Доступ по PIN</div>
+    <input id="pin-input" type="password" inputmode="numeric" placeholder="PIN">
+    <button id="pin-btn" class="btn primary">Войти</button>
+    <div id="pin-error" class="pin-error"></div>
+  </div>
+</div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">☢</span>
+    <div>
+      <div class="brand-name">Doomsday Tyranny Bot</div>
+      <div class="brand-sub"><span id="hdr-version">v?</span> · <span id="hdr-clock">--:--:--</span></div>
+    </div>
+  </div>
+  <div id="hdr-status" class="hdr-status">…</div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button data-tab="dash" class="tab active">Дашборд</button>
+  <button data-tab="timers" class="tab">Таймеры</button>
+  <button data-tab="settings" class="tab">Настройки</button>
+  <button data-tab="api" class="tab">API / Discovery</button>
+  <button data-tab="journal" class="tab">Журнал</button>
+</nav>
+
+<main>
+
+<!-- ===== ДАШБОРД ===== -->
+<section id="tab-dash" class="tab-page active">
+  <div class="timer-grid">
+    <div class="card timer-card">
+      <div class="card-label">Следующий ребут производства</div>
+      <div class="timer" id="t-reboot">--:--:--</div>
+      <div class="card-sub" id="t-reboot-sub">нет данных</div>
+      <div class="progress"><div class="progress-bar" id="t-reboot-bar" style="width:0%"></div></div>
+    </div>
+    <div class="card timer-card">
+      <div class="card-label">Следующий скан ресурсов</div>
+      <div class="timer" id="t-scan">--:--:--</div>
+      <div class="card-sub" id="t-scan-sub">нет данных</div>
+      <div class="progress"><div class="progress-bar green" id="t-scan-bar" style="width:0%"></div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-label">Ресурсы <span id="res-ts" class="muted"></span></div>
+      <button class="btn small" data-action="scan">Скан сейчас</button>
+    </div>
+    <div id="resources" class="resources">
+      <div class="muted">Данные появятся после первого скана (TMA API должен быть настроен) либо из уведомлений бота.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><div class="card-label">Быстрые действия</div></div>
+    <div class="actions-row">
+      <button class="btn primary" data-action="reboot">⟳ Ребут производства</button>
+      <button class="btn" data-action="test-notify">🔔 Тест уведомления</button>
+      <button class="btn" data-action="check">✓ Диагностика</button>
+      <button class="btn" data-action="update">⬇ Проверить обновления</button>
+    </div>
+    <div id="running-banner" class="running hidden"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><div class="card-label">Последние события</div></div>
+    <div id="events" class="events"></div>
+  </div>
+</section>
+
+<!-- ===== ТАЙМЕРЫ ===== -->
+<section id="tab-timers" class="tab-page">
+  <div class="card">
+    <div class="card-label">Расписание (сохранение вступает в силу со следующего прохода cron)</div>
+    <div class="form-grid">
+      <label>Интервал ребута производства, часов <span class="hint">(Premium = 12)</span>
+        <input id="f-reboot-hours" type="number" min="1" max="168" step="1"></label>
+      <label>Интервал скана ресурсов, минут <span class="hint">(минимум 4)</span>
+        <input id="f-scan-min" type="number" min="4" max="1440" step="1"></label>
+      <label>Время daily-сводки <span class="hint">(ЧЧ:ММ, локальное)</span>
+        <input id="f-summary-time" type="time"></label>
+      <label>Проверка обновлений, минут
+        <input id="f-update-min" type="number" min="15" max="1440" step="5"></label>
+      <label>Повтор при ошибке, минут
+        <input id="f-retry-min" type="number" min="5" max="720" step="5"></label>
+    </div>
+    <button id="save-timers" class="btn primary">Сохранить таймеры</button>
+    <span id="timers-msg" class="save-msg"></span>
+  </div>
+
+  <div class="card">
+    <div class="card-label">Текущее состояние таймеров</div>
+    <div id="timers-state" class="kv-list"></div>
+    <div class="note">Проходы cron выполняются каждые 10 минут — фактический момент срабатывания округляется до ближайшего прохода. Точность достаточна для 12-часового цикла производства.</div>
+  </div>
+</section>
+
+<!-- ===== НАСТРОЙКИ ===== -->
+<section id="tab-settings" class="tab-page">
+  <div class="card">
+    <div class="card-label">Telegram</div>
+    <div class="form-grid">
+      <label>api_id <span class="hint">(my.telegram.org)</span>
+        <input id="f-api-id" type="number" inputmode="numeric"></label>
+      <label>api_hash <span class="hint">(замаскирован — оставьте как есть, чтобы не менять)</span>
+        <input id="f-api-hash" type="text" autocomplete="off"></label>
+      <label>Телефон <span class="hint">(+7999…, для входа)</span>
+        <input id="f-phone" type="tel"></label>
+      <label>Бот игры
+        <input id="f-game-bot" type="text" placeholder="@DoomsDayTyrannybot"></label>
+      <label>Short name Mini App <span class="hint">(t.me/бот/play → «play»)</span>
+        <input id="f-app-short" type="text" placeholder="play"></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">Мониторинг чата бота</div>
+    <div class="form-grid">
+      <label>Читать последних сообщений бота
+        <input id="f-read-last" type="number" min="0" max="100"></label>
+      <label class="check"><input id="f-send-start" type="checkbox"> Отправлять /start при ребуте</label>
+    </div>
+    <div class="card-sub">Паттерны уведомлений бота (regex, регистронезависимо):</div>
+    <div id="chat-patterns" class="rows"></div>
+    <button id="add-chat-pattern" class="btn small">+ Добавить паттерн</button>
+  </div>
+
+  <div class="card">
+    <div class="card-label">Уведомления</div>
+    <div class="checks-grid" id="notify-toggles"></div>
+    <div class="form-grid">
+      <label>Порог предупреждения, % заполнения
+        <input id="f-warn-pct" type="number" min="50" max="100"></label>
+      <label class="check"><input id="f-notify-enabled" type="checkbox"> Push-уведомления включены</label>
+      <label class="check"><input id="f-open-game" type="checkbox"> Кнопка «Открыть игру» в уведомлениях</label>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">Веб-панель</div>
+    <div class="form-grid">
+      <label>Адрес <span class="hint">(127.0.0.1 — только телефон; 0.0.0.0 — доступ из Wi-Fi, задайте PIN!)</span>
+        <input id="f-web-host" type="text"></label>
+      <label>Порт
+        <input id="f-web-port" type="number" min="1024" max="65535"></label>
+      <label>PIN <span class="hint">(пусто = без защиты; только при 0.0.0.0!)</span>
+        <input id="f-web-pin" type="text" autocomplete="off"></label>
+    </div>
+    <div class="note">После смены адреса/порта нажмите «Сохранить настройки», затем «Перезапустить панель».</div>
+    <button id="restart-web" class="btn">↻ Перезапустить панель</button>
+  </div>
+
+  <button id="save-settings" class="btn primary big">Сохранить настройки</button>
+  <span id="settings-msg" class="save-msg"></span>
+</section>
+
+<!-- ===== API / DISCOVERY ===== -->
+<section id="tab-api" class="tab-page">
+  <div class="card">
+    <div class="card-head">
+      <div class="card-label">Discovery API игры</div>
+      <button class="btn primary" data-action="discover"> Запустить Discovery</button>
+    </div>
+    <div class="note">Discovery открывает Mini App игры от вашего имени, скачивает его скрипты и находит HTTP-эндпоинты. Отчёт ниже — основа для настройки шагов ребута/скана.</div>
+    <div id="discovery-report"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">Базовый URL API</div>
+    <div class="form-grid">
+      <label>base_url <span class="hint">(домен API игры; пусто = origin Mini App)</span>
+        <input id="f-tma-base" type="url" placeholder="https://api.game.example"></label>
+      <label>Таймаут запросов, сек
+        <input id="f-tma-timeout" type="number" min="5" max="120"></label>
+      <label class="check"><input id="f-tma-enabled" type="checkbox"> TMA-автоматизация включена</label>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-label">Шаги ребута производства</div>
+      <button id="add-step-reboot" class="btn small">+ Шаг</button>
+    </div>
+    <div id="steps-reboot" class="rows"></div>
+    <div class="note">Выполняются последовательно при каждом ребуте. Доступные переменные: <code>{{init_data}}</code>, <code>{{base_url}}</code>, <code>{{webview_url}}</code>, а также всё, что извлечено в <code>extract</code> предыдущих шагов.</div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-label">Шаги скана состояния</div>
+      <button id="add-step-scan" class="btn small">+ Шаг</button>
+    </div>
+    <div id="steps-scan" class="rows"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">Извлечение ресурсов</div>
+    <div class="form-grid">
+      <label>json_path до массива ресурсов <span class="hint">(напр. data.resources)</span>
+        <input id="f-res-jsonpath" type="text"></label>
+    </div>
+    <div class="form-grid three">
+      <label>Поле: имя <input id="f-f-name" type="text" placeholder="name"></label>
+      <label>Поле: текущее <input id="f-f-cur" type="text" placeholder="amount"></label>
+      <label>Поле: максимум <input id="f-f-max" type="text" placeholder="capacity"></label>
+    </div>
+    <div class="card-sub">Text-паттерны (fallback, regex: имя / текущее / максимум):</div>
+    <div id="res-patterns" class="rows"></div>
+    <button id="add-res-pattern" class="btn small">+ Паттерн</button>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-label">Обновления из Загрузок</div>
+      <button class="btn" data-action="update">Проверить сейчас</button>
+    </div>
+    <div class="form-grid">
+      <label>Каталог Загрузок <span class="hint">(пусто = автоопределение)</span>
+        <input id="f-dl-dir" type="text" placeholder="/storage/emulated/0/Download"></label>
+      <label>Маска архива
+        <input id="f-dl-pattern" type="text" value="doomsday-bot-v*.zip"></label>
+      <label class="check"><input id="f-upd-enabled" type="checkbox"> Автообновление включено</label>
+    </div>
+    <div id="updates-info"></div>
+  </div>
+
+  <button id="save-api" class="btn primary big">Сохранить API и обновления</button>
+  <span id="api-msg" class="save-msg"></span>
+</section>
+
+<!-- ===== ЖУРНАЛ ===== -->
+<section id="tab-journal" class="tab-page">
+  <div class="card">
+    <div class="card-head">
+      <div class="card-label">События</div>
+      <select id="event-kind" class="select">
+        <option value="">все</option>
+        <option value="reboot">ребут</option>
+        <option value="scan">скан</option>
+        <option value="summary">сводка</option>
+        <option value="chat">чат бота</option>
+        <option value="update">обновления</option>
+        <option value="notify:resource_full">склад полон</option>
+        <option value="notify:resource_warn">почти полон</option>
+        <option value="notify:errors">ошибки</option>
+        <option value="check">диагностика</option>
+      </select>
+    </div>
+    <div id="journal-events" class="events"></div>
+    <button id="events-more" class="btn small">Ещё 30</button>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><div class="card-label">Запуски действий</div></div>
+    <div id="runs-list" class="runs"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-label">bot.log</div>
+      <button id="log-refresh" class="btn small">Обновить</button>
+    </div>
+    <pre id="log-tail" class="log"></pre>
+  </div>
+</section>
+
+</main>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,184 @@
+# -*- coding: utf-8 -*-
+"""Конфигурация: дефолты, загрузка с миграцией, атомарное сохранение, валидация."""
+import copy
+import json
+import os
+import re
+import tempfile
+
+from . import paths
+
+DEFAULTS = {
+    "telegram": {
+        "api_id": 0,
+        "api_hash": "",
+        "phone": "",
+        "session": "doomsday",
+        "game_bot": "@DoomsDayTyrannybot",
+        "app_short_name": "play",  # t.me/DoomsDayTyrannybot/play
+    },
+    "schedules": {
+        "reboot_interval_hours": 12,
+        "scan_interval_minutes": 60,
+        "summary_time": "20:00",
+        "update_check_minutes": 60,
+        "retry_failed_minutes": 20,
+    },
+    "tma": {
+        "enabled": True,
+        "base_url": "",  # основной домен API игры; подставляется как {{base_url}}
+        "timeout_seconds": 25,
+        "steps_reboot": [],  # HTTP-шаги ребута производства (см. README)
+        "steps_scan": [],    # HTTP-шаги скана состояния/ресурсов
+        "resources": {
+            "json_path": "",  # путь до массива ресурсов в JSON-ответе скана
+            "fields": {"name": "name", "current": "amount", "max": "capacity", "state": "state"},
+            "text_patterns": [
+                {"name": "Ресурс", "regex": r"([А-Яа-яЁёA-Za-z ]{2,24})[:\s]+(\d[\d\s.,]*)\s*/\s*(\d[\d\s.,]*)", "enabled": True},
+            ],
+        },
+    },
+    "chat": {
+        "read_last_messages": 20,
+        "send_start_on_reboot": True,
+        "parse_patterns": [
+            {"match": r"[Сс]клад переполнен", "severity": "warn", "notify": True, "title": "Склад переполнен"},
+            {"match": r"[Тт]ребуется перезагрузка|ребут", "severity": "warn", "notify": True, "title": "Требуется перезагрузка"},
+            {"match": r"[Пп]ерегрев", "severity": "info", "notify": False, "title": "Перегрев производства"},
+        ],
+    },
+    "notify": {
+        "enabled": True,
+        "warn_threshold_pct": 90,
+        "events": {
+            "resource_warn": True,
+            "resource_full": True,
+            "reboot_report": True,
+            "scan_report": False,
+            "errors": True,
+            "daily_summary": True,
+            "update_applied": True,
+            "chat_alerts": True,
+        },
+        "priority_high": ["resource_full", "errors"],
+        "open_game_button": True,
+    },
+    "updater": {
+        "enabled": True,
+        "download_dir": "",  # пусто = автоопределение (~/storage/downloads → /storage/emulated/0/Download)
+        "pattern": "doomsday-bot-v*.zip",
+        "keep_applied": 5,
+        "restart_web_on_update": True,
+    },
+    "web": {
+        "host": "127.0.0.1",
+        "port": 8080,
+        "pin": "",
+    },
+}
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Рекурсивное слияние: значения override важнее base, недостающие ключи берутся из base."""
+    out = copy.deepcopy(base)
+    for k, v in (override or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = copy.deepcopy(v)
+    return out
+
+
+def load() -> dict:
+    """Загрузить конфиг с подмешиванием дефолтов (миграция на новую версию без потери данных)."""
+    user = {}
+    try:
+        with open(paths.CONFIG_PATH, "r", encoding="utf-8") as f:
+            user = json.load(f)
+        if not isinstance(user, dict):
+            user = {}
+    except OSError:
+        user = {}
+    except ValueError:
+        # повреждённый JSON — не теряем: сохраняем бэкап и работаем с дефолтами
+        try:
+            os.replace(paths.CONFIG_PATH, paths.CONFIG_PATH + ".broken")
+        except OSError:
+            pass
+        user = {}
+    return _deep_merge(DEFAULTS, user)
+
+
+def save(cfg: dict) -> dict:
+    """Атомарно сохранить конфиг (chmod 600). Возвращает сохранённый словарь."""
+    merged = _deep_merge(DEFAULTS, cfg)
+    os.makedirs(os.path.dirname(paths.CONFIG_PATH), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(paths.CONFIG_PATH), prefix=".config-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(merged, f, ensure_ascii=False, indent=2, sort_keys=False)
+            f.write("\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, paths.CONFIG_PATH)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    return merged
+
+
+def validate(cfg: dict) -> list:
+    """Список человекочитаемых ошибок конфигурации."""
+    errs = []
+    tg = cfg.get("telegram", {})
+    if not tg.get("api_id") or not str(tg.get("api_id", "")).isdigit():
+        errs.append("telegram.api_id не задан (получите на my.telegram.org)")
+    if not tg.get("api_hash"):
+        errs.append("telegram.api_hash не задан")
+    if not tg.get("game_bot"):
+        errs.append("telegram.game_bot не задан")
+    sch = cfg.get("schedules", {})
+    if not (0 < float(sch.get("reboot_interval_hours") or 0) <= 168):
+        errs.append("schedules.reboot_interval_hours: укажите число часов от 0 до 168")
+    if not (4 <= int(sch.get("scan_interval_minutes") or 0) <= 1440):
+        errs.append("schedules.scan_interval_minutes: от 4 минут до суток")
+    m = re.match(r"^(\d{1,2}):(\d{2})$", str(sch.get("summary_time") or ""))
+    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+        errs.append("schedules.summary_time: формат ЧЧ:ММ (например 20:00)")
+    web = cfg.get("web", {})
+    if not (1024 <= int(web.get("port") or 0) <= 65535):
+        errs.append("web.port: порт 1024–65535")
+    for key in ("steps_reboot", "steps_scan"):
+        val = (cfg.get("tma") or {}).get(key) or []
+        if not isinstance(val, list):
+            errs.append(f"tma.{key}: должен быть списком шагов")
+            break
+    # проверка шагов
+    for key in ("steps_reboot", "steps_scan"):
+        for i, step in enumerate((cfg.get("tma") or {}).get(key) or []):
+            if not isinstance(step, dict) or "url" not in step:
+                errs.append(f"tma.{key}[{i}]: нет поля url")
+                break
+    return errs
+
+
+def masked(cfg: dict) -> dict:
+    """Копия конфига для веб-интерфейса: секреты замаскированы."""
+    out = copy.deepcopy(cfg)
+    tg = out.get("telegram", {})
+    if tg.get("api_hash"):
+        tg["api_hash"] = "••••••" + str(tg["api_hash"])[-4:]
+    return out
+
+
+def api_hash_stored() -> bool:
+    """Есть ли в конфиге реальный api_hash (не маска)."""
+    try:
+        with open(paths.CONFIG_PATH, "r", encoding="utf-8") as f:
+            user = json.load(f)
+        h = (user.get("telegram") or {}).get("api_hash") or ""
+        return bool(h) and "•" not in h
+    except (OSError, ValueError):
+        return False

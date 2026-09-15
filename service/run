@@ -1,0 +1,8 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# runit-сервис веб-панели (termux-services).
+# Устанавливается в $PREFIX/var/service/doomsday-web/run
+export DOOMSDAY_BOT_DIR="${DOOMSDAY_BOT_DIR:-$HOME/doomsday-bot}"
+if [ -n "${PREFIX:-}" ]; then
+    export PATH="$PREFIX/bin:$PATH"
+fi
+exec "$DOOMSDAY_BOT_DIR/bin/doomsday" web 2>&1

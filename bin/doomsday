@@ -1,0 +1,68 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# doomsday — CLI-обёртка Doomsday Tyranny Bot для Termux.
+# Запускается любым способом: напрямую, через симлинк в $PREFIX/bin,
+# из cron/service/boot (абсолютный путь) или с DOOMSDAY_BOT_DIR из окружения.
+set -u
+
+# ---------- определяем каталог установки ----------
+APP_DIR_DOOMSDAY="${DOOMSDAY_BOT_DIR:-}"
+if [ -z "$APP_DIR_DOOMSDAY" ] || [ ! -d "$APP_DIR_DOOMSDAY/lib" ]; then
+    APP_DIR_DOOMSDAY=""
+    SELF="$0"
+    # 1) канонический путь — разворачивает симлинки одним вызовом (coreutils)
+    _RESOLVED="$(readlink -f -- "$SELF" 2>/dev/null)" || _RESOLVED=""
+    [ -n "$_RESOLVED" ] && SELF="$_RESOLVED"
+    # 2) страховка: пошаговое разворачивание симлинков
+    _HOPS=0
+    while [ -L "$SELF" ] && [ "$_HOPS" -lt 20 ]; do
+        LINK="$(readlink "$SELF" 2>/dev/null)" || break
+        [ -z "$LINK" ] && break
+        case "$LINK" in
+            /*) SELF="$LINK" ;;
+            *)  SELF="$(dirname -- "$SELF")/$LINK" ;;
+        esac
+        _HOPS=$((_HOPS + 1))
+    done
+    _CAND=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." 2>/dev/null && pwd -P)
+    [ -n "$_CAND" ] && [ -d "$_CAND/lib" ] && APP_DIR_DOOMSDAY="$_CAND"
+    # страховка: стандартное место установки в Termux
+    if [ -z "$APP_DIR_DOOMSDAY" ]; then
+        _CAND="${HOME:-}/doomsday-bot"
+        [ -d "$_CAND/lib" ] && APP_DIR_DOOMSDAY="$_CAND"
+    fi
+fi
+if [ -z "$APP_DIR_DOOMSDAY" ] || [ ! -d "$APP_DIR_DOOMSDAY/lib" ]; then
+    echo "Не удалось определить каталог установки doomsday-bot." >&2
+    echo "Запустите напрямую: ~/doomsday-bot/bin/doomsday" >&2
+    echo "или экспортируйте DOOMSDAY_BOT_DIR=/путь/к/установке" >&2
+    exit 1
+fi
+export DOOMSDAY_BOT_DIR="$APP_DIR_DOOMSDAY"
+export PYTHONPATH="$APP_DIR_DOOMSDAY${PYTHONPATH:+:$PYTHONPATH}"
+cd "$APP_DIR_DOOMSDAY" || exit 1
+
+# PATH Termux (для termux-notification, sv, crontab и т.д.)
+if [ -n "${PREFIX:-}" ]; then
+    case ":$PATH:" in
+        *":$PREFIX/bin:"*) ;;
+        *) export PATH="$PREFIX/bin:$PATH" ;;
+    esac
+fi
+export PYTHONUNBUFFERED=1
+export LANG="${LANG:-C.UTF-8}"
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+
+PY="$APP_DIR_DOOMSDAY/venv/bin/python"
+[ -x "$PY" ] || PY="$(command -v python3 || command -v python)"
+if [ -z "$PY" ]; then
+    echo "Python не найден. Выполните: pkg install python" >&2
+    exit 127
+fi
+
+# срезаем слишком большой cron.log
+CRON_LOG="$APP_DIR_DOOMSDAY/logs/cron.log"
+if [ -f "$CRON_LOG" ] && [ "$(wc -c < "$CRON_LOG")" -gt 2000000 ]; then
+    tail -n 500 "$CRON_LOG" > "$CRON_LOG.tmp" 2>/dev/null && mv -f "$CRON_LOG.tmp" "$CRON_LOG"
+fi
+
+exec "$PY" -m lib.worker "$@"

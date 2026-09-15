@@ -1,0 +1,32 @@
+# Doomsday Tyranny Bot — .gitignore
+# ВАЖНО: config.json СОЗНАТЕЛЬНО не игнорируется (приватный репозиторий,
+# синхронизация настроек между устройствами). В нём api_id/api_hash и телефон —
+# репозиторий обязан оставаться PRIVATE.
+
+# --- секреты и сессии (НИКОГДА не коммитить) ---
+session/
+*.session
+*.session-journal
+
+# --- рантайм-артефакты ---
+logs/
+reports/
+*.db
+*.db-wal
+*.db-shm
+.updates/
+.update-staging/
+.backup/
+worker.lock
+state.json
+
+# --- python ---
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# --- прочее ---
+*.zip
+.DS_Store

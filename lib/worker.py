@@ -1,0 +1,463 @@
+# -*- coding: utf-8 -*-
+"""CLI-ядро: cron-циклы и все команды doomsday.
+
+Запускается через bin/doomsday. Поддерживает:
+  cron                  — плановый проход (вызывается cronie каждые 10 мин)
+  scan|reboot|summary|discover|check|test-notify|update|login|setup|status|log|web|selftest
+"""
+import argparse
+import datetime
+import fcntl
+import json
+import logging
+import logging.handlers
+import os
+import re
+import sys
+
+from . import config as cfgmod
+from . import db
+from . import notify as notify_mod
+from . import paths
+from . import engine
+
+log = logging.getLogger("doomsday")
+
+
+# ---------------- инфраструктура ----------------
+
+def setup_logging(verbose: bool = False) -> None:
+    paths.ensure_dirs()
+    level = logging.DEBUG if verbose else logging.INFO
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", "%H:%M:%S")
+    root = logging.getLogger()
+    root.setLevel(level)
+    try:
+        fh = logging.handlers.RotatingFileHandler(
+            paths.LOG_PATH, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        root.addHandler(fh)
+    except OSError:
+        pass
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
+
+
+class SingleInstance:
+    """Блокировка воркера: cron — неблокирующая, ручные команды — с ожиданием."""
+
+    def __init__(self, wait: bool):
+        self.wait = wait
+        self.fd = None
+
+    def __enter__(self):
+        self.fd = open(paths.LOCK_PATH, "w")
+        flags = fcntl.LOCK_EX
+        if not self.wait:
+            flags |= fcntl.LOCK_NB
+        try:
+            fcntl.flock(self.fd, flags)
+            self.fd.write(str(os.getpid()))
+            self.fd.flush()
+            return self
+        except BlockingIOError:
+            print("Другой проход воркера уже выполняется — выходим.")
+            raise SystemExit(0)
+
+    def __exit__(self, *exc):
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            self.fd.close()
+        except OSError:
+            pass
+        return False
+
+
+def _ts(key):
+    v = db.kv_get(key)
+    try:
+        return datetime.datetime.fromisoformat(v) if v else None
+    except ValueError:
+        return None
+
+
+def _due(now, cfg: dict, name: str) -> bool:
+    """Настало ли время действия: интервал истёк и не слишком рано после ошибки."""
+    sch = cfg.get("schedules", {})
+    if name == "reboot":
+        interval = float(sch.get("reboot_interval_hours", 12) or 12) * 3600
+        last_ok = _ts("last_reboot_ts")
+    elif name == "scan":
+        interval = int(sch.get("scan_interval_minutes", 60) or 60) * 60
+        last_ok = _ts("last_scan_ts")
+    else:
+        return True
+    if last_ok is not None and (now - last_ok).total_seconds() < interval:
+        return False
+    # троттлинг повторов при ошибках
+    retry = int(sch.get("retry_failed_minutes", 20) or 20) * 60
+    last_fail = _ts(f"last_fail_{name}")
+    if last_fail is not None and (now - last_fail).total_seconds() < retry:
+        return False
+    return True
+
+
+def _fmt_delta(sec) -> str:
+    if sec is None:
+        return "нет данных"
+    sec = int(sec)
+    h, m = sec // 3600, (sec % 3600) // 60
+    return (f"{h}ч {m:02d}м" if h else f"{m} мин") + (" назад" if sec >= 0 else "")
+
+
+# ---------------- cron-планировщик ----------------
+
+def cmd_cron(args) -> int:
+    cfg = cfgmod.load()
+    now = datetime.datetime.now()
+
+    # 1) автообновление из Загрузок
+    if cfg.get("updater", {}).get("enabled", True):
+        try:
+            from . import updater
+            last = _ts("last_update_check_ts")
+            interval = int(cfg["updater"].get("update_check_minutes", 60)) * 60
+            if last is None or (now - last).total_seconds() >= interval:
+                db.kv_set("last_update_check_ts", db.now_iso())
+                res = updater.check_and_apply(cfg)
+                if res.get("applied"):
+                    # после обновления код поменялся — перезапустимся в следующий раз
+                    print("Обновление применено:", res.get("version"))
+                    return 0
+        except Exception as e:
+            log.exception("Ошибка автообновления: %s", e)
+            db.event("update", "Ошибка автообновления", str(e), severity="warn")
+
+    actions = []
+    # 2) ребут производства
+    if _due(now, cfg, "reboot"):
+        actions.append("reboot")
+    # 3) скан ресурсов
+    if _due(now, cfg, "scan"):
+        actions.append("scan")
+    # 4) сводка дня
+    st = str(cfg.get("schedules", {}).get("summary_time") or "20:00")
+    m = re.match(r"^(\d{1,2}):(\d{2})$", st)
+    if m:
+        hh, mm = int(m.group(1)), int(m.group(2))
+        due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if now >= due and db.kv_get("last_summary_date") != now.date().isoformat():
+            actions.append("summary")
+
+    print(f"[cron] {db.now_iso()} план: {actions or 'ничего не подошло'}")
+    for name in actions:
+        try:
+            r = _run_action(cfg, name)
+            if r.get("ok", True):
+                db.kv_set(f"last_fail_{name}", None)
+            else:
+                db.kv_set(f"last_fail_{name}", db.now_iso())
+        except Exception as e:
+            db.kv_set(f"last_fail_{name}", db.now_iso())
+            log.exception("Действие %s провалилось: %s", name, e)
+            notify_mod.notify_error(cfg, f"Ошибка: {name}", str(e)[:300])
+            db.kv_set("last_error_ts", db.now_iso())
+    return 0
+
+
+def _run_action(cfg, name: str) -> dict:
+    if name == "reboot":
+        return engine.run_coro(engine.action_reboot(cfg))
+    if name == "scan":
+        return engine.run_coro(engine.action_scan(cfg))
+    if name == "summary":
+        return engine.run_coro(engine.action_summary(cfg))
+    raise ValueError(f"Неизвестное действие: {name}")
+
+
+# ---------------- отдельные команды ----------------
+
+def cmd_scan(args) -> int:
+    cfg = cfgmod.load()
+    r = engine.run_coro(engine.action_scan(cfg))
+    print(json.dumps(r, ensure_ascii=False, indent=2, default=str))
+    return 0 if r.get("ok") else 1
+
+
+def cmd_reboot(args) -> int:
+    cfg = cfgmod.load()
+    r = engine.run_coro(engine.action_reboot(cfg))
+    print(json.dumps(r, ensure_ascii=False, indent=2, default=str))
+    return 0 if r.get("ok") else 1
+
+
+def cmd_summary(args) -> int:
+    cfg = cfgmod.load()
+    r = engine.run_coro(engine.action_summary(cfg))
+    print(r.get("body", ""))
+    return 0
+
+
+def cmd_discover(args) -> int:
+    cfg = cfgmod.load()
+    r = engine.run_coro(engine.action_discover(cfg))
+    print(json.dumps(r, ensure_ascii=False, indent=2, default=str))
+    out = os.path.join(paths.REPORTS_DIR, f"discovery-{db.now_iso().replace(':', '')}.json")
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(r, f, ensure_ascii=False, indent=2)
+    print(f"\nОтчёт сохранён: {out}")
+    print("Отправьте этот файл разработчику ассистенту — он подготовит точные шаги API для ребута.")
+    return 0
+
+
+def cmd_check(args) -> int:
+    cfg = cfgmod.load()
+    r = engine.run_coro(engine.action_check(cfg))
+    return 0 if r.get("ok") else 1
+
+
+def cmd_test_notify(args) -> int:
+    cfg = cfgmod.load()
+    ok = notify_mod.notify(cfg, "errors", "Тест уведомлений",
+                           "Если вы это видите — пуш-уведомления работают!",
+                           high=False, open_game=True)
+    print("Push доставлен" if ok else "Push НЕ доставлен — см. журнал (termux-api и Termux:API)")
+    return 0 if ok else 1
+
+
+def cmd_login(args) -> int:
+    cfg = cfgmod.load()
+
+    async def _login():
+        client = await engine.tgapi.connect(cfg, interactive=True)
+        me = await client.get_me()
+        await client.disconnect()
+        return me
+
+    me = engine.run_coro(_login())
+    print(f"Вход выполнен: {getattr(me, 'first_name', '')} (@{getattr(me, 'username', '')})")
+    db.event("login", "Вход в Telegram", f"@{getattr(me, 'username', '')}")
+    return 0
+
+
+def cmd_setup(args) -> int:
+    """Интерактивный мастер первого запуска."""
+    cfg = cfgmod.load()
+    print("=== Настройка Doomsday Tyranny Bot ===")
+    print("(Enter — оставить текущее значение в [скобках])\n")
+
+    def ask(prompt, cur, default=""):
+        shown = cur if cur not in ("", None) else default
+        v = input(f"{prompt} [{shown}]: ").strip()
+        return v or (shown if shown != "" else default)
+
+    tg = cfg["telegram"]
+    api_id = ask("api_id с my.telegram.org", tg.get("api_id", ""))
+    if api_id.isdigit():
+        tg["api_id"] = int(api_id)
+    api_hash = ask("api_hash с my.telegram.org", "••••" if cfgmod.api_hash_stored() else "")
+    if api_hash and "•" not in api_hash:
+        tg["api_hash"] = api_hash
+    tg["phone"] = ask("Телефон (для входа, напр. +79991234567)", tg.get("phone", ""))
+    tg["game_bot"] = "@" + ask("Бот игры", (tg.get("game_bot", "@DoomsDayTyrannybot") or "@DoomsDayTyrannybot").lstrip("@")).lstrip("@")
+
+    sch = cfg["schedules"]
+    rib = ask("Интервал ребута, часов (Premium=12)", sch.get("reboot_interval_hours", 12))
+    try:
+        sch["reboot_interval_hours"] = max(1, min(168, int(rib)))
+    except ValueError:
+        pass
+    scm = ask("Интервал скана ресурсов, минут", sch.get("scan_interval_minutes", 60))
+    try:
+        sch["scan_interval_minutes"] = max(4, min(1440, int(scm)))
+    except ValueError:
+        pass
+    sch["summary_time"] = ask("Время daily-сводки ЧЧ:ММ", sch.get("summary_time", "20:00"))
+
+    cfgmod.save(cfg)
+    print("\nКонфигурация сохранена:", paths.CONFIG_PATH)
+    errs = cfgmod.validate(cfg)
+    if errs:
+        print("ВНИМАНИЕ:", "; ".join(errs))
+    print("\nДальше: doomsday login  →  doomsday check  →  doomsday discover")
+    return 0
+
+
+def cmd_status(args) -> int:
+    cfg = cfgmod.load()
+    now = datetime.datetime.now()
+    ver = paths.read_version()
+    last_reboot, last_scan = _ts("last_reboot_ts"), _ts("last_scan_ts")
+    hours = float(cfg["schedules"].get("reboot_interval_hours", 12))
+    minutes = int(cfg["schedules"].get("scan_interval_minutes", 60))
+    nr = (last_reboot or now) + datetime.timedelta(hours=hours)
+    ns = (last_scan or now) + datetime.timedelta(minutes=minutes)
+    print(f"Doomsday Tyranny Bot v{ver}")
+    print(f"Бот игры:            {cfg['telegram']['game_bot']}")
+    print(f"Последний ребут:     {_fmt_delta((now - last_reboot).total_seconds()) if last_reboot else 'нет данных'}"
+          f"  → следующий ~{nr.strftime('%d.%m %H:%M') if last_reboot else '?'}")
+    print(f"Последний скан:      {_fmt_delta((now - last_scan).total_seconds()) if last_scan else 'нет данных'}"
+          f"  → следующий ~{ns.strftime('%d.%m %H:%M') if last_scan else '?'}")
+    res = db.resources_latest()
+    if res:
+        print("Ресурсы (последний скан):")
+        for r in res[:12]:
+            mx = r.get("maximum")
+            pct = f" ({r['current'] / mx * 100:.0f}%)" if mx else ""
+            print(f"  - {r['name']}: {r['current']} / {mx if mx is not None else '?'}{pct} {r.get('state') or ''}")
+    print(f"Веб-панель:          http://{cfg['web'].get('host', '127.0.0.1')}:{cfg['web'].get('port', 8080)}")
+    return 0
+
+
+def cmd_log(args) -> int:
+    try:
+        with open(paths.LOG_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except OSError:
+        print("Лог пуст")
+        return 0
+    n = int(getattr(args, "lines", 50) or 50)
+    for line in lines[-n:]:
+        print(line.rstrip())
+    return 0
+
+
+def cmd_update(args) -> int:
+    from . import updater
+    cfg = cfgmod.load()
+    res = updater.check_and_apply(cfg, force=getattr(args, "force", False))
+    print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
+    return 0 if (res.get("applied") or not res.get("error")) else 1
+
+
+def cmd_web(args) -> int:
+    from . import webui
+    cfg = cfgmod.load()
+    webui.serve_forever(cfg)
+    return 0
+
+
+# ---------------- selftest ----------------
+
+def cmd_selftest(args) -> int:
+    """Быстрые юнит-тесты без Telegram: конфиг, БД, версии, парсеры, TMA-драйвер."""
+    import tempfile
+    from . import tma as tma_mod
+
+    failures = []
+
+    def check(name, fn):
+        try:
+            ok, detail = fn()
+            status = "ok" if ok else "FAIL"
+            print(f"  {status}  {name}" + (f": {detail}" if detail else ""))
+            if not ok:
+                failures.append(name)
+        except Exception as e:
+            print(f"  FAIL  {name}: {e}")
+            failures.append(name)
+
+    print("selftest: конфигурация")
+    check("дефолты сливаются", lambda: (bool(cfgmod.DEFAULTS["schedules"]["reboot_interval_hours"] == 12), ""))
+    check("миграция добавляет недостающие ключи",
+          lambda: (cfgmod._deep_merge(cfgmod.DEFAULTS, {"web": {"port": 9999}})["web"]["pin"] == "" and
+                    cfgmod._deep_merge(cfgmod.DEFAULTS, {"web": {"port": 9999}})["web"]["port"] == 9999, ""))
+    check("валидация ловит пустой api_id",
+          lambda: (len(cfgmod.validate({"telegram": {}})) > 0, ""))
+    check("маскирование api_hash",
+          lambda: ("•" in cfgmod.masked({"telegram": {"api_hash": "abcdef123456"}})["telegram"]["api_hash"], ""))
+
+    print("selftest: парсеры")
+    text = "Дерево: 1 200 / 5 000\nМеталл: 4 999/10 000\nУран: 9 800 / 10 000\nСклад переполнен: Нефть"
+    res = engine.parse_resources_from_text(text, cfgmod.DEFAULTS["tma"]["resources"]["text_patterns"])
+    check("regex-парсер ресурсов", lambda: (len(res) >= 3 and any(r["name"].startswith("Дерево") for r in res),
+                                            f"найдено {len(res)}"))
+    check("пороговые проценты", lambda: (any(r["pct"] and r["pct"] >= 90 for r in res), ""))
+    alerts = engine.parse_chat_alerts(
+        [{"id": 1, "date": "x", "text": "Внимание: Склад переполнен!"}],
+        cfgmod.DEFAULTS["chat"]["parse_patterns"])
+    check("парсер уведомлений чата", lambda: (len(alerts) == 1, alerts[0]["title"] if alerts else ""))
+
+    print("selftest: TMA-драйвер")
+    parsed = tma_mod.parse_webview_url(
+        "https://game.example.com/app/?tgWebAuthData=user%3D1%26auth_date%3D1&tgWebVersion=8")
+    check("разбор webview URL", lambda: (bool(parsed["init_data"]) and parsed["origin"] == "https://game.example.com", ""))
+    ctx = {"base_url": "https://api.example.com", "token": "XYZ"}
+    check("шаблонизация {{var}}",
+          lambda: (tma_mod.render_template("{{base_url}}/x?t={{token}}", ctx) == "https://api.example.com/x?t=XYZ", ""))
+    check("json_path", lambda: (tma_mod.json_path({"a": {"b": [10, 20]}}, "a.b[1]") == 20, ""))
+    check("запуск пустого конвейера шагов", lambda: (tma_mod.run_steps([], {})["ok"] is True, ""))
+
+    print("selftest: версии обновлений")
+    from . import updater as upd
+    check("parse_version", lambda: (upd.parse_version("doomsday-bot-v1.2.3.zip") == (1, 2, 3), ""))
+    check("сравнение версий", lambda: (upd.version_cmp((1, 2, 0), (1, 2, 3)) < 0, ""))
+
+    print("selftest: БД")
+    with tempfile.TemporaryDirectory() as tmp:
+        old_db, old_app = paths.DB_PATH, paths.APP_DIR
+        try:
+            paths.DB_PATH = os.path.join(tmp, "test.db")
+            db._conn = None
+            db.kv_set("probe", [1, 2])
+            check("kv get/set", lambda: (db.kv_get("probe") == [1, 2], ""))
+            db.event("scan", "тест", "тело")
+            check("events", lambda: (len(db.events_list(1)) == 1, ""))
+            db.resource_snapshot([{"name": "Тест", "current": 5, "max": 10, "state": ""}])
+            check("resources snapshot", lambda: (db.resources_latest()[0]["name"] == "Тест", ""))
+        finally:
+            paths.DB_PATH, paths.APP_DIR = old_db, old_app
+            db._conn = None
+
+    print()
+    if failures:
+        print(f"ПРОВАЛЕНО: {failures}")
+        return 1
+    print("Все проверки пройдены ✔")
+    return 0
+
+
+# ---------------- входная точка ----------------
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(prog="doomsday", description="Doomsday Tyranny Bot для Termux")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("cron", help="плановый проход (для cronie)")
+    sub.add_parser("scan", help="скан ресурсов сейчас")
+    sub.add_parser("reboot", help="ребут производства сейчас")
+    sub.add_parser("summary", help="сводка дня сейчас")
+    sub.add_parser("discover", help="обнаружить API игры")
+    sub.add_parser("check", help="диагностика")
+    sub.add_parser("test-notify", help="тест push-уведомления")
+    sub.add_parser("login", help="вход в Telegram (интерактивно)")
+    sub.add_parser("setup", help="мастер настройки")
+    sub.add_parser("status", help="краткий статус")
+    lg = sub.add_parser("log", help="хвост лога")
+    lg.add_argument("-n", "--lines", type=int, default=50)
+    up = sub.add_parser("update", help="обновление из архива в Загрузках")
+    up.add_argument("--force", action="store_true", help="ставить даже ту же/старую версию")
+    sub.add_parser("web", help="запустить веб-панель (обычно — сервисом)")
+    sub.add_parser("selftest", help="самопроверка без Telegram")
+    args = p.parse_args(argv)
+
+    setup_logging(verbose=os.environ.get("DOOMSDAY_VERBOSE") == "1")
+
+    wait_lock = args.cmd in ("reboot", "scan", "cron")
+    if args.cmd in ("web", "selftest", "setup", "status", "log", "test-notify"):
+        handler = {
+            "web": cmd_web, "selftest": cmd_selftest, "setup": cmd_setup,
+            "status": cmd_status, "log": cmd_log, "test-notify": cmd_test_notify,
+        }[args.cmd]
+        return handler(args)
+
+    with SingleInstance(wait=wait_lock):
+        return {
+            "cron": cmd_cron, "scan": cmd_scan, "reboot": cmd_reboot,
+            "summary": cmd_summary, "discover": cmd_discover, "check": cmd_check,
+            "update": cmd_update, "login": cmd_login,
+        }[args.cmd](args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
