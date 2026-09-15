@@ -123,35 +123,35 @@ def build_overview(cfg: dict) -> dict:
 
     hours = float(cfg.get("schedules", {}).get("reboot_interval_hours", 12) or 12)
     minutes = int(cfg.get("schedules", {}).get("scan_interval_minutes", 60) or 60)
-    last_reboot, last_scan = since("last_reboot_ts"), since("last_scan_ts")
-    next_reboot = last_reboot + datetime.timedelta(hours=hours) if last_reboot else None
+    last_scan = since("last_scan_ts")
     next_scan = last_scan + datetime.timedelta(minutes=minutes) if last_scan else None
     resources = []
-    for r in db.resources_latest():
+    for r in db.resources_latest_ru():
         mx = r.get("maximum")
         pct = round((r.get("current") or 0) / mx * 100, 1) if mx else None
-        resources.append({"name": r["name"], "current": r.get("current"), "max": mx,
-                          "pct": pct, "state": r.get("state") or "",
+        resources.append({"id": r.get("id"), "name": r["name"], "current": r.get("current"),
+                          "max": mx, "pct": pct, "state": r.get("state") or "",
                           "ts": _iso_min(r.get("ts"))})
     discovery = db.kv_get("discovery") or {}
     running = db.running_run()
     checks = db.events_list(limit=5, kind="check")
-    farm = starter_mod.farm_deadline_info()
+    farm = starter_mod.farm_deadline_info(cfg)
     timers = {
         "last_reboot": _iso_min(db.kv_get("last_reboot_ts")),
-        "next_reboot": next_reboot.isoformat(timespec="seconds") if next_reboot else None,
-        "reboot_in_sec": max(0, int((next_reboot - now).total_seconds())) if next_reboot else None,
         "last_scan": _iso_min(db.kv_get("last_scan_ts")),
         "next_scan": next_scan.isoformat(timespec="seconds") if next_scan else None,
         "scan_in_sec": max(0, int((next_scan - now).total_seconds())) if next_scan else None,
         "last_summary": db.kv_get("last_summary_date"),
-        "reboot_interval_hours": hours,
         "scan_interval_minutes": minutes,
         "farm_cycle": {
             "known": farm.get("known", False),
             "ends_at": farm.get("ends_at"),
             "left_sec": farm.get("left_sec"),
             "active": farm.get("active"),
+            "reboot_at": farm.get("reboot_at"),
+            "reboot_in_sec": farm.get("reboot_in_sec"),
+            "before_min": farm.get("before_min"),
+            "total_sec": int(hours * 3600),
         },
     }
     return {
@@ -159,6 +159,7 @@ def build_overview(cfg: dict) -> dict:
         "now": db.now_iso(),
         "timers": timers,
         "resources": resources,
+        "resource_filter": (cfg.get("notify", {}).get("resource_filter") or []),
         "running": running or None,
         "events": db.events_list(limit=12),
         "last_check_ok": checks[0].get("severity") == "info" if checks else None,
@@ -239,6 +240,9 @@ class Handler(BaseHTTPRequestHandler):
     def _api_get(self, path, q, cfg):
         if path == "/api/overview":
             return self._send_json(build_overview(cfg))
+        if path == "/api/resources-catalog":
+            from . import game_data
+            return self._send_json({"resources": game_data.catalog()})
         if path == "/api/config":
             out = cfgmod.masked(cfg)
             out["_has_api_hash"] = cfgmod.api_hash_stored()

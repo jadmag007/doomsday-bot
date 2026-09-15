@@ -68,7 +68,7 @@ main { max-width: 860px; margin: 0 auto; padding: .9rem .75rem; }
 
 /* таймеры */
 .timer-grid { display: grid; grid-template-columns: 1fr; gap: .75rem; margin-bottom: .9rem; }
-@media (min-width: 640px) { .timer-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (min-width: 640px) { .timer-grid { grid-template-columns: repeat(2, 1fr); } }
 .timer { font-family: var(--mono); font-size: 2rem; color: var(--accent); letter-spacing: .04em; margin: .2rem 0; }
 .progress { height: 5px; border-radius: 3px; background: var(--bg2); overflow: hidden; margin-top: .5rem; }
 .progress-bar { height: 100%; background: linear-gradient(90deg, #ff8c42, var(--accent)); transition: width .5s; }
@@ -85,6 +85,22 @@ main { max-width: 860px; margin: 0 auto; padding: .9rem .75rem; }
 .res-fill.full { background: var(--danger); }
 .res-state { font-size: .68rem; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
 .res-state.bad { color: var(--danger); border-color: rgba(255,95,86,.5); }
+.res-off { color: var(--muted); font-size: .75rem; }
+
+/* каталог выбора ресурсов */
+.checks-grid {
+  display: grid; grid-template-columns: 1fr; gap: .3rem .9rem;
+  margin: .6rem 0; max-height: 340px; overflow-y: auto;
+  padding: .6rem .7rem; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+}
+@media (min-width: 560px) { .checks-grid { grid-template-columns: 1fr 1fr; } }
+@media (min-width: 760px) { .checks-grid { grid-template-columns: 1fr 1fr 1fr; } }
+.checks-grid .check {
+  display: flex; align-items: center; gap: .5rem; font-size: .84rem; cursor: pointer;
+  padding: .18rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.res-tools { display: flex; gap: .4rem; flex-wrap: wrap; }
+.res-save-row { display: flex; align-items: center; gap: .6rem; margin-top: .4rem; }
 
 /* кнопки */
 .btn {

@@ -75,11 +75,21 @@ def parse_resources_from_text(text: str, patterns: list) -> list:
     return list(dedup.values())
 
 
-def _mk_resource(name, cur, mx, state=""):
+def _mk_resource(name, cur, mx, state="", rid=None):
     pct = None
     if cur is not None and mx is not None and mx > 0:
         pct = round(cur / mx * 100, 1)
-    return {"name": name[:64], "current": cur, "max": mx, "pct": pct, "state": state or ""}
+    row = {"name": name[:64], "current": cur, "max": mx, "pct": pct, "state": state or ""}
+    if rid:
+        row["id"] = rid
+    return row
+
+
+def _res_key(r: dict) -> str:
+    """Стабильный ключ ресурса: игровой id либо имя (для кастомных парсеров)."""
+    from . import game_data
+    rid = r.get("id") or game_data.rid_by_name(r.get("name"))
+    return rid or str(r.get("name") or "")
 
 
 def parse_chat_alerts(messages: list, patterns: list) -> list:
@@ -161,8 +171,8 @@ def parse_resources_doomsday(state: dict) -> list:
             st = "склад переполнен"
         else:
             st = ""
-        name = game_data.NAMES.get(rid, rid)
-        rows.append(_mk_resource(name, count, cap, st))
+        name = game_data.ru_name(rid, rid)
+        rows.append(_mk_resource(name, count, cap, st, rid))
     return rows
 
 
@@ -283,8 +293,15 @@ def _notify_reboot_needed(cfg: dict) -> None:
 
 
 def _check_thresholds(cfg: dict, resources: list) -> None:
-    """Пороговые уведомления о наполнении склада (с дедупликацией)."""
+    """Пороговые уведомления о наполнении склада (с дедупликацией).
+
+    Если задан notify.resource_filter (список id), уведомления приходят
+    только по выбранным ресурсам; пустой список = все ресурсы.
+    """
     warn_pct = float(cfg.get("notify", {}).get("warn_threshold_pct", 90) or 90)
+    flt = set(cfg.get("notify", {}).get("resource_filter") or [])
+    if flt:
+        resources = [r for r in resources if _res_key(r) in flt]
     notified_full = set(db.kv_get("notified_full", []) or [])
     notified_warn = set(db.kv_get("notified_warn", []) or [])
     ev = cfg.get("notify", {}).get("events", {})
@@ -326,6 +343,7 @@ async def action_reboot(cfg: dict) -> dict:
     """Ребут производства: TMA API rebootProduction (встроенный пресет Doomsday)."""
     result = {"ok": True, "steps": [], "notes": []}
     tma_cfg = cfg.get("tma", {})
+    prev_cycle = db.kv_get("passive_farm_ends_at")  # цикл, который перезапускаем
     client = await tgapi.connect(cfg)
     try:
         bot = await tgapi.get_bot(client, cfg)
@@ -362,6 +380,7 @@ async def action_reboot(cfg: dict) -> dict:
             result["notes"].append("tma.steps_reboot не настроен — уведомление отправлено вручную")
         if result["ok"]:
             db.kv_set("last_reboot_ts", db.now_iso())
+            db.kv_set("cycle_reboot_guard", prev_cycle)  # этот цикл уже перезапущен
             db.kv_set("notified_full", [])
             db.kv_set("notified_warn", [])
         body = json.dumps({"steps": result["steps"], "cycle_until": result.get("cycle_until")},
@@ -503,14 +522,14 @@ def os_path_exists_session(cfg: dict) -> bool:
 async def action_summary(cfg: dict) -> dict:
     """Ежедневная сводка: ресурсы, счётчики, таймеры."""
     from . import starter as starter_mod
-    resources = db.resources_latest()
+    resources = db.resources_latest_ru()
     today = db.now_iso()[:10]
     evs = db.events_list(limit=200)
     reboots = sum(1 for e in evs if e["kind"] == "reboot" and (e["ts"] or "").startswith(today))
     scans = sum(1 for e in evs if e["kind"] == "scan" and (e["ts"] or "").startswith(today))
     errors = sum(1 for e in evs if e["severity"] == "critical" and (e["ts"] or "").startswith(today))
     lines = []
-    farm = starter_mod.farm_deadline_info()
+    farm = starter_mod.farm_deadline_info(cfg)
     if farm.get("known"):
         if farm["active"]:
             h, m = farm["left_sec"] // 3600, (farm["left_sec"] % 3600) // 60
@@ -518,6 +537,9 @@ async def action_summary(cfg: dict) -> dict:
         else:
             lines.append("Цикл производства ИСТЁК — нужен ребут")
     if resources:
+        flt = set(cfg.get("notify", {}).get("resource_filter") or [])
+        if flt:
+            resources = [r for r in resources if _res_key(r) in flt]
         top = sorted(resources, key=lambda r: -(r.get("current") or 0))[:8]
         for r in top:
             mx = r["maximum"] if "maximum" in r else r.get("max")

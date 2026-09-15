@@ -33,6 +33,7 @@
 <nav class="tabs" id="tabs">
   <button data-tab="dash" class="tab active">Дашборд</button>
   <button data-tab="timers" class="tab">Таймеры</button>
+  <button data-tab="res" class="tab">Ресурсы</button>
   <button data-tab="settings" class="tab">Настройки</button>
   <button data-tab="api" class="tab">API / Discovery</button>
   <button data-tab="journal" class="tab">Журнал</button>
@@ -50,26 +51,10 @@
       <div class="progress"><div class="progress-bar" id="t-farm-bar" style="width:0%"></div></div>
     </div>
     <div class="card timer-card">
-      <div class="card-label">Следующий ребут производства</div>
-      <div class="timer" id="t-reboot">--:--:--</div>
-      <div class="card-sub" id="t-reboot-sub">нет данных</div>
-      <div class="progress"><div class="progress-bar" id="t-reboot-bar" style="width:0%"></div></div>
-    </div>
-    <div class="card timer-card">
       <div class="card-label">Следующий скан ресурсов</div>
       <div class="timer" id="t-scan">--:--:--</div>
       <div class="card-sub" id="t-scan-sub">нет данных</div>
       <div class="progress"><div class="progress-bar green" id="t-scan-bar" style="width:0%"></div></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="card-head">
-      <div class="card-label">Ресурсы <span id="res-ts" class="muted"></span></div>
-      <button class="btn small" data-action="scan">Скан сейчас</button>
-    </div>
-    <div id="resources" class="resources">
-      <div class="muted">Данные появятся после первого скана (TMA API должен быть настроен) либо из уведомлений бота.</div>
     </div>
   </div>
 
@@ -93,10 +78,10 @@
 <!-- ===== ТАЙМЕРЫ ===== -->
 <section id="tab-timers" class="tab-page">
   <div class="card">
-    <div class="card-label">Расписание (сохранение вступает в силу со следующего прохода cron)</div>
+    <div class="card-label">Расписание (вступает в силу со следующего прохода cron)</div>
     <div class="form-grid">
-      <label>Интервал ребута производства, часов <span class="hint">(Premium = 12)</span>
-        <input id="f-reboot-hours" type="number" min="1" max="168" step="1"></label>
+      <label>Ребут за N минут до конца цикла <span class="hint">(обычно 10 — фарм не прерывается)</span>
+        <input id="f-before-min" type="number" min="0" max="360" step="1"></label>
       <label>Интервал скана ресурсов, минут <span class="hint">(минимум 4)</span>
         <input id="f-scan-min" type="number" min="4" max="1440" step="1"></label>
       <label>Время daily-сводки <span class="hint">(ЧЧ:ММ, локальное)</span>
@@ -106,12 +91,42 @@
     </div>
     <button id="save-timers" class="btn primary">Сохранить таймеры</button>
     <span id="timers-msg" class="save-msg"></span>
+    <div class="note">Ребут производства выполняется автоматически по игровому циклу: за указанное число минут до его окончания (точность — до прохода cron, раз в 10 минут). Если данных о цикле нет, используется запасной интервал 12 ч от последнего ребута.</div>
   </div>
 
   <div class="card">
     <div class="card-label">Текущее состояние таймеров</div>
     <div id="timers-state" class="kv-list"></div>
-    <div class="note">Проходы cron выполняются каждые 10 минут — фактический момент срабатывания округляется до ближайшего прохода. Точность достаточна для 12-часового цикла производства.</div>
+    <div class="note">Проходы cron выполняются каждые 10 минут — фактический момент срабатывания округляется до ближайшего прохода.</div>
+  </div>
+</section>
+
+<!-- ===== РЕСУРСЫ ===== -->
+<section id="tab-res" class="tab-page">
+  <div class="card">
+    <div class="card-head">
+      <div class="card-label">Отслеживаемые ресурсы <span id="res-filter-count" class="muted"></span></div>
+      <div class="res-tools">
+        <button id="res-select-all" class="btn small">Выбрать все</button>
+        <button id="res-select-none" class="btn small">Снять выбор</button>
+      </div>
+    </div>
+    <div class="card-sub">Отметьте ресурсы, по которым присылать push-уведомления (переполнение склада, порог заполнения). Ничего не выбрано — уведомления приходят по всем ресурсам.</div>
+    <div id="res-catalog" class="checks-grid"></div>
+    <div class="res-save-row">
+      <button id="save-res-filter" class="btn primary">Сохранить выбор</button>
+      <span id="res-msg" class="save-msg"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-label">Состояние складов <span id="res-ts" class="muted"></span></div>
+      <button class="btn small" data-action="scan">Скан сейчас</button>
+    </div>
+    <div id="resources" class="resources">
+      <div class="muted">Данные появятся после первого скана (TMA API должен быть настроен) либо из уведомлений бота.</div>
+    </div>
   </div>
 </section>
 

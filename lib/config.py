@@ -18,7 +18,8 @@ DEFAULTS = {
         "app_short_name": "play",  # t.me/DoomsDayTyrannybot/play
     },
     "schedules": {
-        "reboot_interval_hours": 12,
+        "reboot_interval_hours": 12,       # запасной интервал (если цикл игры неизвестен)
+        "reboot_before_end_minutes": 10,   # авто-ребут за N минут до конца цикла
         "scan_interval_minutes": 60,
         "summary_time": "20:00",
         "retry_failed_minutes": 20,
@@ -49,6 +50,7 @@ DEFAULTS = {
     "notify": {
         "enabled": True,
         "warn_threshold_pct": 90,
+        "resource_filter": [],  # id ресурсов; пусто = уведомления по всем
         "events": {
             "resource_warn": True,
             "resource_full": True,
@@ -158,6 +160,8 @@ def validate(cfg: dict) -> list:
     sch = cfg.get("schedules", {})
     if not (0 < float(sch.get("reboot_interval_hours") or 0) <= 168):
         errs.append("schedules.reboot_interval_hours: укажите число часов от 0 до 168")
+    if not (0 <= int(sch.get("reboot_before_end_minutes") or 0) <= 360):
+        errs.append("schedules.reboot_before_end_minutes: от 0 до 360 минут")
     if not (4 <= int(sch.get("scan_interval_minutes") or 0) <= 1440):
         errs.append("schedules.scan_interval_minutes: от 4 минут до суток")
     m = re.match(r"^(\d{1,2}):(\d{2})$", str(sch.get("summary_time") or ""))
@@ -166,6 +170,11 @@ def validate(cfg: dict) -> list:
     web = cfg.get("web", {})
     if not (1024 <= int(web.get("port") or 0) <= 65535):
         errs.append("web.port: порт 1024–65535")
+    rf = (cfg.get("notify") or {}).get("resource_filter")
+    if rf is None:
+        rf = []
+    if not isinstance(rf, list) or not all(isinstance(x, str) and x for x in rf):
+        errs.append("notify.resource_filter: список id ресурсов (строки)")
     for key in ("steps_reboot", "steps_scan"):
         val = (cfg.get("tma") or {}).get(key) or []
         if not isinstance(val, list):

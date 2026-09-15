@@ -2,7 +2,8 @@
 """Статические данные игры Doomsday Tyranny (извлечены из JS-бандла).
 
 CAPACITIES: ёмкость склада шахты по уровню levelStore (index = уровень).
-NAMES: человекочитаемые имена ресурсов по игровому id.
+NAMES: английские имена ресурсов по игровому id (как в самой игре).
+RU_NAMES: русские названия для панели и уведомлений (id — стабильный ключ).
 Извлечено из https://telegram-miracle-f1779.web.app (index-*.js), v1.3.0.
 При обновлении игры таблицу можно освежить через doomsday discover.
 """
@@ -63,6 +64,100 @@ NAMES = {
     "uranus": "Uranus",
     "xeon": "Xeon",
 }
+
+# Русские названия (перевод интерфейса игры; ключи те же, что в NAMES).
+RU_NAMES = {
+    "alloy1": "Сплав",
+    "aluminum": "Алюминий",
+    "aluminum_m2": "Профильный алюминий",
+    "aluminum_m3": "Авиационный алюминий",
+    "ammo762": "Патроны 7,62",
+    "at452_cargo": "АТ452 грузовой",
+    "at452_fight": "АТ452 боевой",
+    "at452_support": "АТ452 поддержки",
+    "body_at452": "Корпус АТ452",
+    "cassete": "Кассета",
+    "cast_iron": "Чугун",
+    "chassis_at452": "Шасси АТ452",
+    "components1": "Компоненты 1 ур.",
+    "components2": "Компоненты 2 ур.",
+    "components3": "Компоненты 3 ур.",
+    "cpu14": "ЦП 14 нм",
+    "cpu17": "ЦП 17 нм",
+    "cpu20": "ЦП 20 нм",
+    "d1": "D1 Разведчик",
+    "d1k": "D1 Какамикадзе",
+    "d2r2": "D2R2 Строитель",
+    "ddt_res": "DDT-ресурс",
+    "disel": "Дизтопливо",
+    "engine_4213": "Двигатель-4213",
+    "event_res": "Событийный ресурс",
+    "floppy": "Дискета",
+    "hdd": "Жёсткий диск",
+    "iron": "Железо",
+    "meatrunner": "Мясной бегун",
+    "microcircuit1": "Микросхема",
+    "minigun": "Миниган",
+    "nullRes": "nullRes",
+    "p1_scout": "P1 Разведчик",
+    "pbacid": "PB-кислота",
+    "petroleum": "Нефть",
+    "polymer": "Полимер",
+    "powder": "Порох",
+    "quartz": "Кварц",
+    "repair_kit": "Ремкомплект",
+    "rubber": "Резина",
+    "silicon": "Кремний",
+    "start_res1": "Уголь",
+    "start_res2": "D2",
+    "steel": "Сталь",
+    "steel_plates": "Стальные листы",
+    "sulfur": "Сера",
+    "sulfuracid": "Серная кислота",
+    "t1": "T-1",
+    "t2_builder": "T2 Строитель",
+    "tires": "Шины",
+    "u235": "Уран-235",
+    "uran_pills": "Урановые таблетки",
+    "uranus": "Уран",
+    "xeon": "Xeon",
+}
+
+_BY_NAME = {}
+
+
+def _by_name() -> dict:
+    """Кеш «имя → id» (английские и русские варианты)."""
+    if not _BY_NAME:
+        for src in (NAMES, RU_NAMES):
+            for rid, nm in src.items():
+                _BY_NAME.setdefault(str(nm), rid)
+                _BY_NAME.setdefault(str(nm).lower(), rid)
+    return _BY_NAME
+
+
+def rid_by_name(name) -> str | None:
+    """Игровой id ресурса по любому написанию имени (англ./рус.), иначе None."""
+    if not name:
+        return None
+    b = _by_name()
+    return b.get(str(name)) or b.get(str(name).lower())
+
+
+def ru_name(rid, fallback=None) -> str:
+    """Русское название ресурса по id; нет перевода — английское; нет и его — fallback/rid."""
+    if rid in RU_NAMES:
+        return RU_NAMES[rid]
+    if rid in NAMES:
+        return NAMES[rid]
+    return fallback if fallback is not None else str(rid)
+
+
+def catalog() -> list:
+    """Каталог всех ресурсов игры для панели: [{id, name}] по-русски, по алфавиту."""
+    ids = sorted(set(NAMES) | set(CAPACITIES))
+    out = [{"id": rid, "name": ru_name(rid)} for rid in ids]
+    return sorted(out, key=lambda x: x["name"].lower())
 
 CAPACITIES = {
     "alloy1": [1200, 12000, 23000, 34000, 45000, 56000, 67000, 78000, 89000, 100000, 111000, 122000, 133000, 144000, 155000, 166000, 177000, 188000, 199000, 210000, 221000, 232000, 243000, 254000, 265000, 276000, 287000, 298000, 309000, 320000, 331000, 342000, 353000, 364000, 375000, 386000, 397000, 408000, 419000, 430000],

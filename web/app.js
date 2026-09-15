@@ -37,6 +37,10 @@ function fmtTs(iso) {
   if (!iso) return "нет данных";
   return String(iso).replace("T", " ").slice(5, 16);
 }
+function fmtClock(iso) {
+  if (!iso) return "";
+  return String(iso).replace("T", " ").slice(11, 16);
+}
 function fmtNum(v) {
   if (v == null) return "?";
   const f = Number(v);
@@ -113,13 +117,10 @@ function renderOverview(o) {
 
   // таймеры
   const T = o.timers;
-  $("t-reboot").textContent = fmtDur(T.reboot_in_sec);
-  $("t-reboot-sub").textContent = T.last_reboot ? `последний: ${fmtTs(T.last_reboot)} · цикл ${T.reboot_interval_hours}ч` : "первый ребут при следующем проходе";
   $("t-scan").textContent = fmtDur(T.scan_in_sec);
   $("t-scan-sub").textContent = T.last_scan ? `последний: ${fmtTs(T.last_scan)} · каждые ${T.scan_interval_minutes}м` : "первый скан при следующем проходе";
-  $("t-reboot-bar").style.width = pctOf(T.reboot_in_sec, T.reboot_interval_hours * 3600);
   $("t-scan-bar").style.width = pctOf(T.scan_in_sec, T.scan_interval_minutes * 60);
-  // цикл производства (из API игры)
+  // цикл производства (из API игры) + время авто-ребута
   const F = T.farm_cycle || {}, fEl = $("t-farm");
   fEl.style.color = "";
   if (!F.known) {
@@ -128,34 +129,17 @@ function renderOverview(o) {
     $("t-farm-bar").style.width = "0%";
   } else if (F.active) {
     fEl.textContent = fmtDur(F.left_sec);
-    $("t-farm-sub").textContent = `конец цикла: ${fmtTs(F.ends_at)}`;
-    $("t-farm-bar").style.width = pctOf(F.left_sec, T.reboot_interval_hours * 3600);
+    $("t-farm-sub").textContent = `конец цикла: ${fmtTs(F.ends_at)}`
+      + (F.reboot_at ? ` · авто-ребут ~${fmtClock(F.reboot_at)}` : "");
+    $("t-farm-bar").style.width = pctOf(F.left_sec, F.total_sec || 12 * 3600);
   } else {
     fEl.textContent = "истёк";
     fEl.style.color = "var(--danger)";
-    $("t-farm-sub").textContent = "требуется ребут — бот сделает его в ближайший проход";
+    $("t-farm-sub").textContent = "ребут в ближайший проход cron (до 10 минут)";
     $("t-farm-bar").style.width = "100%";
   }
 
-  // ресурсы
-  const box = $("resources");
-  const lastTs = (o.resources[0] || {}).ts;
-  $("res-ts").textContent = lastTs ? `· ${fmtTs(lastTs)}` : "";
-  if (!o.resources.length) {
-    box.innerHTML = `<div class="muted">Нет данных. ${o.tma_configured ? "" : "Настройте TMA API (вкладка API / Discovery) — либо ждите уведомлений бота в чате."}</div>`;
-  } else {
-    box.innerHTML = o.resources.map(r => {
-      const pct = r.pct != null ? Math.min(100, Math.max(0, r.pct)) : null;
-      const cls = pct == null ? "" : pct >= 100 ? "full" : pct >= WARN_PCT ? "warn" : "";
-      const stateBad = /переполн|full|ребут|перезагруз/i.test(r.state || "");
-      return `<div class="res-row">
-        <div class="res-name" title="${esc(r.name)}">${esc(r.name)}</div>
-        <div class="res-bar"><div class="res-fill ${cls}" style="width:${pct == null ? 100 : pct}%; ${pct == null ? "opacity:.25" : ""}"></div></div>
-        <div class="res-vals">${fmtNum(r.current)}/${fmtNum(r.max)}${r.state ? ` <span class="res-state ${stateBad ? "bad" : ""}">${esc(r.state)}</span>` : ""}</div>
-      </div>`;
-    }).join("");
-  }
-
+  renderResourcesState(o);
   renderEvents($("events"), o.events.slice(0, 8));
   renderTimersState(T, o);
 }
@@ -178,11 +162,86 @@ function renderEvents(el, events) {
     </div>`).join("");
 }
 
+/* ================= ресурсы: состояние + выбор для уведомлений ================= */
+let RES_FILTER = [];
+let RES_CATALOG = null;
+
+function renderResourcesState(o) {
+  const box = $("resources");
+  if (!box) return;
+  const flt = new Set(o.resource_filter || RES_FILTER || []);
+  const lastTs = (o.resources[0] || {}).ts;
+  $("res-ts").textContent = lastTs ? `· ${fmtTs(lastTs)}` : "";
+  if (!o.resources.length) {
+    box.innerHTML = `<div class="muted">Нет данных. ${o.tma_configured ? "" : "Настройте TMA API (вкладка API / Discovery) — либо ждите уведомлений бота в чате."}</div>`;
+    return;
+  }
+  box.innerHTML = o.resources.map(r => {
+    const pct = r.pct != null ? Math.min(100, Math.max(0, r.pct)) : null;
+    const cls = pct == null ? "" : pct >= 100 ? "full" : pct >= WARN_PCT ? "warn" : "";
+    const stateBad = /переполн|full|ребут|перезагруз/i.test(r.state || "");
+    const off = flt.size && !(r.id && flt.has(r.id));
+    return `<div class="res-row">
+      <div class="res-name" title="${esc(r.name)}">${esc(r.name)}${off ? ' <span class="res-off" title="Не отслеживается — уведомлений нет">◦</span>' : ""}</div>
+      <div class="res-bar"><div class="res-fill ${cls}" style="width:${pct == null ? 100 : pct}%; ${pct == null ? "opacity:.25" : ""}"></div></div>
+      <div class="res-vals">${fmtNum(r.current)}/${fmtNum(r.max)}${r.state ? ` <span class="res-state ${stateBad ? "bad" : ""}">${esc(r.state)}</span>` : ""}</div>
+    </div>`;
+  }).join("");
+}
+
+async function loadCatalog() {
+  try {
+    const c = await api("/api/config");  // не читаем CFG до инициализации (TDZ)
+    RES_FILTER = (c.notify && c.notify.resource_filter) || [];
+    const d = await api("/api/resources-catalog");
+    RES_CATALOG = d.resources || [];
+    renderCatalog();
+  } catch (e) { /* PIN-оверлей уже показан */ }
+}
+
+function renderCatalog() {
+  const box = $("res-catalog");
+  if (!box || !RES_CATALOG) return;
+  const flt = new Set(RES_FILTER || []);
+  box.innerHTML = RES_CATALOG.map(r =>
+    `<label class="check"><input type="checkbox" data-rid="${esc(r.id)}" ${flt.has(r.id) ? "checked" : ""}> ${esc(r.name)}</label>`).join("");
+  box.querySelectorAll("input[data-rid]").forEach(ch => ch.addEventListener("change", updateResCount));
+  updateResCount();
+}
+
+function updateResCount() {
+  const el = $("res-filter-count");
+  if (!el) return;
+  const n = document.querySelectorAll("#res-catalog input[data-rid]:checked").length;
+  el.textContent = n ? `· выбрано ${n}` : "· выбрано 0 (уведомления по всем)";
+}
+
+$("res-select-all").addEventListener("click", () => {
+  document.querySelectorAll("#res-catalog input[data-rid]").forEach(ch => { ch.checked = true; });
+  updateResCount();
+});
+$("res-select-none").addEventListener("click", () => {
+  document.querySelectorAll("#res-catalog input[data-rid]").forEach(ch => { ch.checked = false; });
+  updateResCount();
+});
+
+$("save-res-filter").addEventListener("click", async () => {
+  try {
+    const c = await api("/api/config");
+    const ids = [...document.querySelectorAll("#res-catalog input[data-rid]:checked")].map(ch => ch.dataset.rid);
+    c.notify = { ...(c.notify || {}) };
+    c.notify.resource_filter = ids;
+    await api("/api/config", { method: "PUT", body: c });
+    RES_FILTER = ids;
+    setMsg("res-msg", "Сохранено ✔");
+    if (OV) renderResourcesState(OV);
+  } catch (e) { setMsg("res-msg", e.message, true); }
+});
+
 /* тикеры обратного отсчёта */
 setInterval(() => {
   if (!OV) return;
   const T = OV.timers;
-  if (T.reboot_in_sec != null) $("t-reboot").textContent = fmtDur(T.reboot_in_sec - 1);
   if (T.scan_in_sec != null) $("t-scan").textContent = fmtDur(T.scan_in_sec - 1);
   const F = T.farm_cycle || {};
   if (F.left_sec != null) {
@@ -222,10 +281,17 @@ function renderTimersState(T, o) {
   let farmLine;
   if (!F.known) farmLine = `<b>Цикл производства:</b> нет данных (после скана/ребута появится)`;
   else if (F.active) farmLine = `<b>Цикл производства:</b> активен, до ${fmtTs(F.ends_at)} (осталось ${fmtDur(F.left_sec)})`;
-  else farmLine = `<b>Цикл производства:</b> <span style="color:var(--danger)">ИСТЁК — нужен ребут</span>`;
+  else farmLine = `<b>Цикл производства:</b> <span style="color:var(--danger)">ИСТЁК — ребут в ближайший проход</span>`;
+  let rbLine = "";
+  if (F.known && F.active && F.reboot_at) {
+    rbLine = `<div><b>Следующий авто-ребут:</b> ${fmtTs(F.reboot_at)} — за ${F.before_min ?? 10} мин до конца цикла, фарм не прерывается</div>`;
+  } else if (F.known && !F.active) {
+    rbLine = `<div><b>Следующий авто-ребут:</b> ближайший проход cron (цикл уже истёк)</div>`;
+  }
   el.innerHTML = `
     <div>${farmLine}</div>
-    <div><b>Последний ребут:</b> ${fmtTs(T.last_reboot)} → следующий ${fmtTs(T.next_reboot)}</div>
+    ${rbLine}
+    <div><b>Последний ребут:</b> ${fmtTs(T.last_reboot)}</div>
     <div><b>Последний скан:</b> ${fmtTs(T.last_scan)} → следующий ${fmtTs(T.next_scan)}</div>
     <div><b>Сводка дня:</b> ${T.last_summary ? T.last_summary : "ещё не было"}</div>
     <div><b>API игры:</b> ${o.tma_preset ? "встроенный пресет (Firebase)" : "кастомные шаги"} · ${esc(o.tma_base_url || "?")}</div>`;
@@ -274,6 +340,7 @@ function renderRuns(runs) {
 function boot() {
   refreshOverview();
   loadConfigIntoForms();
+  loadCatalog();
 }
 window.addEventListener("hashchange", () => {
   const h = location.hash.replace("#", "");
@@ -301,6 +368,8 @@ async function loadConfigIntoForms() {
   try {
     CFG = await api("/api/config");
     WARN_PCT = (CFG.notify && CFG.notify.warn_threshold_pct) || 90;
+    RES_FILTER = (CFG.notify && CFG.notify.resource_filter) || [];
+    if (RES_CATALOG) renderCatalog();
     fillForms(CFG);
   } catch (e) { /* PIN-оверлей уже показан */ }
 }
@@ -309,7 +378,7 @@ function fillForms(c) {
   const tg = c.telegram || {}, sc = c.schedules || {}, nf = c.notify || {},
         wb = c.web || {}, ch = c.chat || {}, tm = c.tma || {};
   // таймеры
-  $("f-reboot-hours").value = sc.reboot_interval_hours ?? 12;
+  $("f-before-min").value = sc.reboot_before_end_minutes ?? 10;
   $("f-scan-min").value = sc.scan_interval_minutes ?? 60;
   $("f-summary-time").value = sc.summary_time || "20:00";
   $("f-retry-min").value = sc.retry_failed_minutes ?? 20;
@@ -492,7 +561,8 @@ $("save-timers").addEventListener("click", async () => {
   try {
     const c = await api("/api/config");
     c.schedules = {
-      reboot_interval_hours: num($("f-reboot-hours").value, 12, 1, 168),
+      reboot_interval_hours: (c.schedules && c.schedules.reboot_interval_hours) ?? 12, // запасной интервал
+      reboot_before_end_minutes: num($("f-before-min").value, 10, 0, 360),
       scan_interval_minutes: num($("f-scan-min").value, 60, 4, 1440),
       summary_time: $("f-summary-time").value || "20:00",
       retry_failed_minutes: num($("f-retry-min").value, 20, 5, 720),

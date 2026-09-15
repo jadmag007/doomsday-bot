@@ -374,8 +374,12 @@ def cmd_stop(args) -> int:
     return 0
 
 
-def farm_deadline_info() -> dict:
-    """Данные о цикле производства для панели/сводки (из kv, пишется scan/reboot)."""
+def farm_deadline_info(cfg: dict = None) -> dict:
+    """Данные о цикле производства для панели/сводки (из kv, пишется scan/reboot).
+
+    При переданном конфиге дополняется временем авто-ребута
+    (за schedules.reboot_before_end_minutes до конца цикла).
+    """
     import time as _time
     ends_raw = db.kv_get("passive_farm_ends_at")
     if not ends_raw:
@@ -385,9 +389,16 @@ def farm_deadline_info() -> dict:
     except ValueError:
         return {"known": False}
     left_sec = int(ends_ms / 1000 - _time.time())
-    return {
+    out = {
         "known": True,
         "ends_at": datetime.datetime.fromtimestamp(ends_ms / 1000).isoformat(timespec="seconds"),
         "left_sec": left_sec,
         "active": left_sec > 0,
     }
+    if cfg is not None:
+        before = int((cfg.get("schedules") or {}).get("reboot_before_end_minutes", 10) or 0)
+        rb_sec = ends_ms / 1000 - before * 60
+        out["before_min"] = before
+        out["reboot_at"] = datetime.datetime.fromtimestamp(rb_sec).isoformat(timespec="seconds")
+        out["reboot_in_sec"] = int(rb_sec - _time.time())
+    return out

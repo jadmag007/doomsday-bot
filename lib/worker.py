@@ -107,6 +107,43 @@ def _due(now, cfg: dict, name: str) -> bool:
     return True
 
 
+def _reboot_due_cycle(cfg: dict, now) -> bool:
+    """Пора ли ребутить производство — по игровому циклу.
+
+    Основной режим: reboot_before_end_minutes до конца цикла игры
+    (passive_farm_ends_at из скана/ребута) — фарм не прерывается.
+    Если цикл уже истёк — ребут немедленно (окно пропущено).
+    Если данных о цикле нет (скан не давал passiveFarm) — запасная
+    логика по интервалу от последнего ребута (режим без TMA).
+    """
+    sch = cfg.get("schedules", {})
+    ends_raw = db.kv_get("passive_farm_ends_at")
+    try:
+        ends_sec = float(ends_raw) / 1000.0 if ends_raw else None
+    except (TypeError, ValueError):
+        ends_sec = None
+    if ends_sec is None:
+        return _due(now, cfg, "reboot")
+    # этот цикл уже перезапускали, а новый дедлайн не получен — час не дёргаемся
+    guard = db.kv_get("cycle_reboot_guard")
+    try:
+        guard_sec = float(guard) / 1000.0 if guard else None
+    except (TypeError, ValueError):
+        guard_sec = None
+    if guard_sec is not None and abs(guard_sec - ends_sec) < 1 \
+            and now.timestamp() < ends_sec + 3600:
+        return False
+    before_min = int(sch.get("reboot_before_end_minutes", 10) or 0)
+    if now.timestamp() < ends_sec - before_min * 60:
+        return False  # окно ребута ещё не открылось
+    # окно открыто (или цикл истёк) — но не чаще, чем разрешает троттлинг ошибок
+    retry = int(sch.get("retry_failed_minutes", 20) or 20) * 60
+    last_fail = _ts("last_fail_reboot")
+    if last_fail is not None and (now - last_fail).total_seconds() < retry:
+        return False
+    return True
+
+
 def _fmt_delta(sec) -> str:
     if sec is None:
         return "нет данных"
@@ -122,8 +159,8 @@ def cmd_cron(args) -> int:
     now = datetime.datetime.now()
 
     actions = []
-    # 1) ребут производства
-    if _due(now, cfg, "reboot"):
+    # 1) ребут производства — по игровому циклу (за N минут до конца)
+    if _reboot_due_cycle(cfg, now):
         actions.append("reboot")
     # 2) скан ресурсов
     if _due(now, cfg, "scan"):
@@ -275,9 +312,9 @@ def cmd_setup(args) -> int:
     tg["game_bot"] = "@" + ask("Бот игры", (tg.get("game_bot", "@DoomsDayTyrannybot") or "@DoomsDayTyrannybot").lstrip("@")).lstrip("@")
 
     sch = cfg["schedules"]
-    rib = ask("Интервал ребута, часов (Premium=12)", sch.get("reboot_interval_hours", 12))
+    rbm = ask("Ребут за N минут до конца цикла производства", sch.get("reboot_before_end_minutes", 10))
     try:
-        sch["reboot_interval_hours"] = max(1, min(168, int(rib)))
+        sch["reboot_before_end_minutes"] = max(0, min(360, int(rbm)))
     except ValueError:
         pass
     scm = ask("Интервал скана ресурсов, минут", sch.get("scan_interval_minutes", 60))
@@ -302,25 +339,26 @@ def cmd_status(args) -> int:
     now = datetime.datetime.now()
     ver = paths.read_version()
     last_reboot, last_scan = _ts("last_reboot_ts"), _ts("last_scan_ts")
-    hours = float(cfg["schedules"].get("reboot_interval_hours", 12))
     minutes = int(cfg["schedules"].get("scan_interval_minutes", 60))
-    nr = (last_reboot or now) + datetime.timedelta(hours=hours)
     ns = (last_scan or now) + datetime.timedelta(minutes=minutes)
+    before_min = int(cfg["schedules"].get("reboot_before_end_minutes", 10))
     print(f"Doomsday Tyranny Bot v{ver}")
     print(f"Бот игры:            {cfg['telegram']['game_bot']}")
-    print(f"Последний ребут:     {_fmt_delta((now - last_reboot).total_seconds()) if last_reboot else 'нет данных'}"
-          f"  → следующий ~{nr.strftime('%d.%m %H:%M') if last_reboot else '?'}")
+    print(f"Последний ребут:     {_fmt_delta((now - last_reboot).total_seconds()) if last_reboot else 'нет данных'}")
     print(f"Последний скан:      {_fmt_delta((now - last_scan).total_seconds()) if last_scan else 'нет данных'}"
           f"  → следующий ~{ns.strftime('%d.%m %H:%M') if last_scan else '?'}")
-    farm = starter_mod.farm_deadline_info()
+    farm = starter_mod.farm_deadline_info(cfg)
     if farm.get("known"):
         if farm["active"]:
             print(f"Цикл производства:   активен, осталось {_fmt_delta(farm['left_sec'])} (до {farm['ends_at'][11:16]})")
+            if farm.get("reboot_at"):
+                print(f"Авто-ребут:          ~{farm['reboot_at'][11:16]} "
+                      f"(за {before_min} мин до конца цикла)")
         else:
-            print(f"Цикл производства:   ИСТЁК {_fmt_delta(-farm['left_sec'])} — нужен ребут")
+            print(f"Цикл производства:   ИСТЁК {_fmt_delta(-farm['left_sec'])} — ребут в ближайший проход")
     else:
         print("Цикл производства:   нет данных (появится после первого скана/ребута)")
-    res = db.resources_latest()
+    res = db.resources_latest_ru()
     if res:
         print("Ресурсы (последний скан):")
         for r in res[:12]:
@@ -461,12 +499,26 @@ def cmd_selftest(args) -> int:
     }
     rows = engine.parse_resources_doomsday(fake_state)
     by_name = {r["name"]: r for r in rows}
-    check("ресурсы Doomsday из initUser", lambda: (len(rows) == 2 and "Сoal" in by_name, str(len(rows))))
-    coal = by_name.get("Сoal") or {}
+    check("ресурсы Doomsday из initUser", lambda: (len(rows) == 2 and "Уголь" in by_name, str(len(rows))))
+    coal = by_name.get("Уголь") or {}
+    check("русские имена и id ресурсов",
+          lambda: (coal.get("id") == "start_res1" and (by_name.get("Уран") or {}).get("id") == "uranus",
+                   str(coal.get("id"))))
     check("ёмкость по levelStore", lambda: (coal.get("max") == 10000.0, str(coal.get("max"))))
     check("склад полон определяется",
-          lambda: ((by_name.get("Uranus") or {}).get("state") == "склад переполнен",
-                   str((by_name.get("Uranus") or {}).get("state"))))
+          lambda: ((by_name.get("Уран") or {}).get("state") == "склад переполнен",
+                   str((by_name.get("Уран") or {}).get("state"))))
+
+    print("selftest: каталог и русские названия")
+    from . import game_data as gd
+    check("перевод есть для всех ресурсов",
+          lambda: (set(gd.RU_NAMES) == set(gd.NAMES), ""))
+    check("rid_by_name (рус/англ)",
+          lambda: (gd.rid_by_name("Сплав") == "alloy1" and gd.rid_by_name("Alloy") == "alloy1"
+                   and gd.rid_by_name("Сoal") == "start_res1", ""))
+    cat = gd.catalog()
+    check("каталог ресурсов полный",
+          lambda: (len(cat) >= 54 and all(c.get("id") and c.get("name") for c in cat), str(len(cat))))
 
     print("selftest: чистка legacy-конфига")
     legacy = {"updater": {"enabled": True}, "schedules": {"update_check_minutes": 30},
@@ -487,8 +539,59 @@ def cmd_selftest(args) -> int:
             check("kv get/set", lambda: (db.kv_get("probe") == [1, 2], ""))
             db.event("scan", "тест", "тело")
             check("events", lambda: (len(db.events_list(1)) == 1, ""))
-            db.resource_snapshot([{"name": "Тест", "current": 5, "max": 10, "state": ""}])
-            check("resources snapshot", lambda: (db.resources_latest()[0]["name"] == "Тест", ""))
+            db.resource_snapshot([{"name": "Alloy", "current": 5, "max": 10, "state": ""}])
+            db.resource_snapshot([{"name": "Сплав", "current": 7, "max": 10, "state": "",
+                                   "id": "alloy1"}])
+            merged = db.resources_latest_ru()
+            check("склейка англ+рус записей", lambda: (len(merged) == 1 and merged[0]["name"] == "Сплав"
+                                                    and merged[0]["current"] == 7
+                                                    and merged[0].get("id") == "alloy1",
+                                                    str(merged)))
+
+            print("selftest: ребут по циклу и фильтр уведомлений")
+            import time as _time
+            now = datetime.datetime.now()
+            cfg_t = cfgmod._deep_merge(cfgmod.DEFAULTS, {})
+            check("нет данных о цикле — запасной интервал",
+                  lambda: (_reboot_due_cycle(cfg_t, now) is True, ""))
+            ends_ms = lambda sec: str(int((_time.time() + sec) * 1000))
+            db.kv_set("passive_farm_ends_at", ends_ms(2 * 3600))
+            check("цикл далеко — ребут не нужен", lambda: (_reboot_due_cycle(cfg_t, now) is False, ""))
+            db.kv_set("passive_farm_ends_at", ends_ms(5 * 60))
+            check("за 10 мин до конца — пора ребутить", lambda: (_reboot_due_cycle(cfg_t, now) is True, ""))
+            db.kv_set("passive_farm_ends_at", ends_ms(-30))
+            check("цикл истёк — ребут немедленно", lambda: (_reboot_due_cycle(cfg_t, now) is True, ""))
+            db.kv_set("cycle_reboot_guard", db.kv_get("passive_farm_ends_at"))
+            check("guard: этот цикл уже перезапущен",
+                  lambda: (_reboot_due_cycle(cfg_t, now) is False, ""))
+            db.kv_set("passive_farm_ends_at", ends_ms(2 * 3600))
+            check("новый цикл после ребута — guard не мешает",
+                  lambda: (_reboot_due_cycle(cfg_t, now) is False, ""))
+
+            db.kv_set("passive_farm_ends_at", None)
+            db.kv_set("cycle_reboot_guard", None)
+            sent = []
+            orig_notify = engine.notify_mod.notify
+            engine.notify_mod.notify = lambda cfg, kind, title, text, **kw: sent.append(title) or True
+            try:
+                res2 = [
+                    {"name": "Сплав", "id": "alloy1", "current": 100, "max": 100, "pct": 100,
+                     "state": "склад переполнен"},
+                    {"name": "Уран", "id": "uranus", "current": 95, "max": 100, "pct": 95,
+                     "state": ""},
+                ]
+                cfg_f = cfgmod._deep_merge(cfgmod.DEFAULTS, {"notify": {"resource_filter": ["alloy1"]}})
+                engine._check_thresholds(cfg_f, res2)
+                check("фильтр: уведомление только по выбранному",
+                      lambda: (sent == ["Склад переполнен: Сплав"], str(sent)))
+                sent.clear()
+                db.kv_set("notified_full", [])
+                db.kv_set("notified_warn", [])
+                engine._check_thresholds(cfgmod._deep_merge(cfgmod.DEFAULTS, {}), res2)
+                check("без фильтра — уведомления по всем",
+                      lambda: (len(sent) == 2, str(sent)))
+            finally:
+                engine.notify_mod.notify = orig_notify
         finally:
             paths.DB_PATH, paths.APP_DIR = old_db, old_app
             db._conn = None

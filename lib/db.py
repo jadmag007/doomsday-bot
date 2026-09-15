@@ -190,6 +190,32 @@ def resources_latest() -> list:
     return [dict(r) for r in rows]
 
 
+def resources_latest_ru() -> list:
+    """Последние значения ресурсов с русскими именами и игровым id.
+
+    Старые записи с английскими именами склеиваются с новыми русскими
+    (побеждает более свежая по номеру записи). Неизвестные имена проходят как есть.
+    """
+    from . import game_data
+    merged = {}
+    for r in resources_latest():
+        rid = game_data.rid_by_name(r.get("name"))
+        key = rid or str(r.get("name"))
+        seq = r.get("id") or 0  # номер записи в БД (для сравнения свежести)
+        prev = merged.get(key)
+        if prev is not None and seq <= prev["_seq"]:
+            continue
+        row = dict(r)
+        row["_seq"] = seq
+        if rid:
+            row["id"] = rid  # игровой id — стабильный ключ фильтра уведомлений
+            row["name"] = game_data.ru_name(rid, r.get("name"))
+        merged[key] = row
+    for row in merged.values():
+        row.pop("_seq", None)
+    return sorted(merged.values(), key=lambda x: str(x.get("name")))
+
+
 def resources_history(hours: int = 24) -> dict:
     since = (datetime.datetime.now() - datetime.timedelta(hours=hours)).isoformat(timespec="seconds")
     with _lock:
