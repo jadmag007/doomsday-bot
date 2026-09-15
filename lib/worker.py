@@ -181,6 +181,27 @@ def _fmt_delta(sec) -> str:
 
 # ---------------- cron-планировщик ----------------
 
+def _ensure_wake_lock() -> None:
+    """Пере-взять wake-lock (идемпотентно).
+
+    Логи устройства 2026-09-15: между проходами cron провалы 43–90 минут —
+    Android Doze усыпляет Termux, даже если wake-lock брался при старте
+    (Termux мог перезапуститься, lock слетел). Каждый проход продлеваем.
+    termux-wake-lock входит в termux-tools, приложение termux-api не нужно.
+    """
+    try:
+        import shutil as _sh
+        import subprocess as _sp
+    except ImportError:
+        return
+    try:
+        wl = _sh.which("termux-wake-lock")
+        if wl:
+            _sp.run([wl], capture_output=True, timeout=10)
+    except (OSError, _sp.SubprocessError):
+        pass
+
+
 def _cron_watchdog(seconds: int = 900) -> None:
     """Сторожевой таймер прохода cron: зависший проход убивается через N секунд.
 
@@ -205,6 +226,7 @@ def cmd_cron(args) -> int:
     cfg = cfgmod.load()
     now = datetime.datetime.now()
     db.kv_set("last_cron_ts", db.now_iso())
+    _ensure_wake_lock()
     _cron_watchdog(900)
 
     # ночной режим: плановых действий нет, бот «спит»
@@ -601,13 +623,40 @@ def cmd_selftest(args) -> int:
     check("session_hash из tgWebAppData",
           lambda: (bctx["session_hash"] == "abc123deadbeef", bctx["session_hash"]))
     steps = tma_mod.get_steps({"tma": {}}, "reboot")
-    check("пресет шагов ребута", lambda: (bool(steps) and steps[0]["url"].endswith("/rebootProduction"), ""))
-    rendered = tma_mod.render_template(steps[0]["body"], {
+    # сессию игры регистрирует только initUser — он ОБЯЗАН идти перед rebootProduction
+    # (диагностика 2026-09-15: без этого 403 "Expired session")
+    check("пресет ребута: initUser первый",
+          lambda: (bool(steps) and steps[0]["name"] == "initUser", str([s.get("name") for s in steps])))
+    check("пресет ребута: rebootProduction второй",
+          lambda: (len(steps) > 1 and steps[1]["url"].endswith("/rebootProduction"), ""))
+    check("initUser в ребуте извлекает конец цикла",
+          lambda: ("farm_ends_at" in (steps[0].get("extract") or {}), ""))
+    rendered = tma_mod.render_template(steps[1]["body"], {
         "init_data": "user=1&hash=abc", "session_hash": "abc"})
     check("тело запроса callable",
           lambda: (rendered == {"data": {"auth": "user=1&hash=abc", "session": "abc"}}, ""))
     check("кастомные шаги важнее пресета",
           lambda: (tma_mod.get_steps({"tma": {"steps_reboot": [{"url": "x"}]}}, "reboot") == [{"url": "x"}], ""))
+
+    print("selftest: протокол сессий ребута (регрессия 2026-09-15)")
+    _t = __import__("time").time()
+    check("свежий цикл (12 ч) — ребут не нужен",
+          lambda: (engine.reboot_fresh_cycle((_t + 43200) * 1000, _t, 600) is True, ""))
+    check("окно ребута (10 мин) — ребут нужен",
+          lambda: (engine.reboot_fresh_cycle((_t + 600) * 1000, _t, 600) is False, ""))
+    check("цикл истёк — ребут нужен",
+          lambda: (engine.reboot_fresh_cycle((_t - 60) * 1000, _t, 600) is False, ""))
+    check("нет данных о цикле — ребут нужен",
+          lambda: (engine.reboot_fresh_cycle(None, _t, 600) is False, ""))
+    _expired = [{"status": "fail",
+                 "detail": "HTTP 403: {\"error\":{\"details\":{\"status\":418},"
+                           "\"message\":\"Expired session\",\"status\":\"PERMISSION_DENIED\"}}"}]
+    check("детектор отказа сессии (Expired session/403)",
+          lambda: (engine._is_session_error(_expired) is True, ""))
+    check("детектор не срабатывает на другие ошибки",
+          lambda: (engine._is_session_error([{"status": "fail", "detail": "HTTP 500: boom"}]) is False, ""))
+    check("детектор игнорирует успешные шаги",
+          lambda: (engine._is_session_error([{"status": "ok", "detail": "HTTP 200"}]) is False, ""))
 
     print("selftest: парсер состояния Doomsday")
     fake_state = {

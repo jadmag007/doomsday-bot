@@ -570,8 +570,53 @@ def _fmt(v):
     return f"{v:,.1f}".replace(",", " ")
 
 
+def _now_sec() -> float:
+    import time as _t
+    return _t.time()
+
+
+def _is_session_error(results: list) -> bool:
+    """Похоже ли падение шагов на отказ сессии игры.
+
+    Сервер отвечает 403 PERMISSION_DENIED "Expired session" (внутренний статус
+    418 — multisession guard), если hash сессии не зарегистрирован через
+    initUser или его перехватило открытое на телефоне приложение.
+    """
+    for r in results or []:
+        if (r.get("status") or "") != "fail":
+            continue
+        d = str(r.get("detail") or "").lower()
+        if ("403" in d or "418" in d or "expired" in d or "permission" in d
+                or "sessionexpired" in d or "unauthenticated" in d):
+            return True
+    return False
+
+
+def reboot_fresh_cycle(ends_at_ms, now_sec: float, before_sec: int,
+                       margin_sec: int = 60) -> bool:
+    """Цикл производства уже «свежий» — ребут не нужен?
+
+    True — до конца цикла больше, чем окно ребута + запас: значит производство
+    уже кто-то перезапустил (например, вручную в игре), и вызывать
+    rebootProduction нельзя — сбросим чужой свежий цикл. Нет данных о конце
+    цикла — False (пусть решение принимает игра).
+    """
+    if not isinstance(ends_at_ms, (int, float)):
+        return False
+    return (ends_at_ms / 1000.0 - now_sec) > (before_sec + margin_sec)
+
+
 async def action_reboot(cfg: dict) -> dict:
-    """Ребут производства: TMA API rebootProduction (встроенный пресет Doomsday)."""
+    """Ребут производства: TMA API rebootProduction (встроенный пресет Doomsday).
+
+    Протокол сессий игры (диагностика 2026-09-15): сервер принимает только
+    hash, зарегистрированный через initUser — первый вызов веб-приложения
+    при загрузке. Поэтому пресет ребута сначала вызывает initUser (регистрирует
+    сессию и заодно возвращает актуальный passiveFarm.endsAt) и только затем
+    rebootProduction той же сессией. Если initUser покажет, что цикл уже
+    свежий — ребут пропускается. При отказе сессии (игра открыта на телефоне
+    в этот момент) — один повтор с новым webview.
+    """
     result = {"ok": True, "steps": [], "notes": []}
     tma_cfg = cfg.get("tma", {})
     prev_cycle = db.kv_get("passive_farm_ends_at")  # цикл, который перезапускаем
@@ -583,9 +628,56 @@ async def action_reboot(cfg: dict) -> dict:
             result["steps"].append({"name": "chat:/start", "status": "ok", "detail": "Отправлен /start боту"})
         steps = tma.get_steps(cfg, "reboot")
         if tma_cfg.get("enabled", True) and steps:
-            webview_url = await tgapi.resolve_webview_url(client, bot, cfg)
-            ctx = tma.build_context(cfg, webview_url)
-            outcome = tma.run_steps(steps, ctx, timeout=int(tma_cfg.get("timeout_seconds", 35)))
+            custom = bool((cfg.get("tma") or {}).get("steps_reboot"))
+            before_sec = int(cfg.get("schedules", {}).get("reboot_before_end_minutes", 10) or 10) * 60
+
+            async def _tma_pass() -> dict:
+                webview_url = await tgapi.resolve_webview_url(client, bot, cfg)
+                ctx = tma.build_context(cfg, webview_url)
+                timeout = int(tma_cfg.get("timeout_seconds", 35))
+                if custom:
+                    # кастомные шаги — как раньше, одним конвейером
+                    return tma.run_steps(steps, ctx, timeout=timeout)
+                # пресет: initUser (регистрация сессии) → rebootProduction
+                init_step = next((s for s in steps if s.get("name") == "initUser"), None)
+                reboot_step = next((s for s in steps if s.get("name") == "rebootProduction"), None)
+                if init_step is None or reboot_step is None:
+                    return tma.run_steps(steps, ctx, timeout=timeout)
+                outcome = tma.run_steps([init_step], ctx, timeout=timeout)
+                if not outcome["ok"]:
+                    return outcome
+                state = outcome["ctx"].get("game_state")
+                if isinstance(state, dict):
+                    _store_balances(state, outcome["ctx"])  # свежие балансы в панель
+                ends = outcome["ctx"].get("farm_ends_at")
+                if reboot_fresh_cycle(ends, _now_sec(), before_sec):
+                    outcome["results"].append({
+                        "name": "rebootProduction", "status": "skip",
+                        "detail": f"цикл уже свежий (до {_fmt_ms_deadline(ends)}) — ребут не нужен"})
+                    db.kv_set("passive_farm_ends_at", str(int(ends)))
+                    db.kv_set("notified_reboot_needed", [])
+                    result["farm_ends_at"] = ends
+                    result["cycle_until"] = _fmt_ms_deadline(ends)
+                    return outcome
+                out = tma.run_steps([reboot_step], ctx, timeout=timeout)
+                outcome["results"] += out["results"]
+                outcome["ok"] = out["ok"]
+                outcome["ctx"] = out["ctx"]
+                return outcome
+
+            outcome = await _tma_pass()
+            if not outcome["ok"] and _is_session_error(outcome["results"]):
+                # сессию перехватило приложение, открытое на телефоне прямо сейчас:
+                # получаем новый webview (новая сессия) и пробуем ещё раз;
+                # обе попытки остаются в журнале шагов
+                result["steps"] += outcome["results"]
+                result["notes"].append("попытка отклонена (сессия) — повтор с новым webview")
+                await asyncio.sleep(3)
+                try:
+                    outcome = await _tma_pass()
+                except tgapi.TgError as e:
+                    result["steps"].append({"name": "webview", "status": "fail", "detail": str(e)})
+                    outcome = {"ok": False, "results": [], "ctx": {}}
             result["steps"] += outcome["results"]
             result["ok"] = outcome["ok"]
             ends_at = outcome["ctx"].get("reboot_ends_at")
@@ -597,7 +689,7 @@ async def action_reboot(cfg: dict) -> dict:
         else:
             # TMA не настроен: «вход в игру» через webview + уведомление с кнопкой
             try:
-                webview_url = await tgapi.resolve_webview_url(client, bot, cfg)
+                await tgapi.resolve_webview_url(client, bot, cfg)
                 result["steps"].append({"name": "webview", "status": "ok",
                                         "detail": "Mini App игры открыт (сессия отмечена)"})
             except tgapi.TgError as e:
@@ -616,15 +708,22 @@ async def action_reboot(cfg: dict) -> dict:
             db.kv_set("notified_warn", [])
         body = json.dumps({"steps": result["steps"], "cycle_until": result.get("cycle_until")},
                           ensure_ascii=False)
-        db.event("reboot", "Ребут производства" if result["ok"] else "Ребут: ошибка",
-                 body, severity="info" if result["ok"] else "critical")
+        any_skip = any(s.get("status") == "skip" for s in result["steps"])
+        title = ("Ребут: цикл уже свежий" if result["ok"] and any_skip
+                 else "Ребут производства" if result["ok"] else "Ребут: ошибка")
+        db.event("reboot", title, body, severity="info" if result["ok"] else "critical")
         if result["ok"] and cfg.get("notify", {}).get("events", {}).get("reboot_report", True):
             ok_steps = [s["name"] for s in result["steps"] if s["status"] == "ok"]
+            skipped = [s for s in result["steps"] if s["status"] == "skip"]
             extra = (f". Новый цикл до {result['cycle_until']}"
                      if result.get("cycle_until") else "")
-            notify_mod.notify(cfg, "reboot_report", "Производство перезапущено",
-                              "Шаги: " + (", ".join(ok_steps) if ok_steps else "нет данных") + extra,
-                              open_game=False)
+            if skipped:
+                notify_mod.notify(cfg, "reboot_report", "Ребут не понадобился",
+                                  skipped[0]["detail"] + extra, open_game=False)
+            else:
+                notify_mod.notify(cfg, "reboot_report", "Производство перезапущено",
+                                  "Шаги: " + (", ".join(ok_steps) if ok_steps else "нет данных") + extra,
+                                  open_game=False)
         elif not result["ok"]:
             failed = [f"{s['name']}: {s['detail']}" for s in result["steps"] if s["status"] == "fail"]
             notify_mod.notify_error(cfg, "Ребут не удался",

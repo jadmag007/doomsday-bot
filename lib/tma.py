@@ -78,10 +78,39 @@ def _compose_init_data(params: dict) -> str:
 # session = поле hash из неё. Ответ: {"result": ...} / {"error": ...}.
 # Свежесть auth_data критична: просроченная подпись → "sessionExpired",
 # поэтому каждый проход заново резолвит webview URL через Telethon.
+#
+# ВАЖНО (диагностика 2026-09-15, логи устройства): сервер игры знает только
+# ту сессию (hash), которая прошла через initUser — это первый вызов веб-приложения
+# при загрузке («INIT USER»). Любой ДРУГОЙ callable с незнакомым hash получает
+# 403 PERMISSION_DENIED "Expired session" (внутренний статус 418 — multisession
+# guard). Поэтому пресет ребута ОБЯЗАН начинаться с initUser: он регистрирует
+# свежую сессию и заодно возвращает актуальный passiveFarm.endsAt.
+# Шаг initUser: полный стейт игры. Используется и в скане, и в ребуте
+# (в ребуте — как регистрация сессии перед rebootProduction).
+INIT_USER_STEP = {
+    "name": "initUser",
+    "method": "POST",
+    "url": "{{base_url}}/initUser",
+    "headers": {"Content-Type": "application/json"},
+    "body": {"data": {"auth": "{{init_data}}", "session": "{{session_hash}}"}},
+    "expect_status": [200],
+    "extract": {
+        "game_state": "result",
+        "farm_ends_at": "result.passiveFarm.endsAt",
+        "is_premium": "result.isPremium",
+        "balance_coin": "result.gameStats.coin",
+        "balance_mcoin": "result.gameStats.mCoin",
+    },
+    "save": "state_raw",
+}
+
 FIREBASE_PRESET = {
     "version": 1,
     "base_url": "https://us-central1-telegram-miracle-f1779.cloudfunctions.net",
     "steps_reboot": [
+        # 1) регистрируем сессию (и узнаём актуальный конец цикла)
+        INIT_USER_STEP,
+        # 2) сам ребут — той же сессией, что и initUser выше
         {
             "name": "rebootProduction",
             "method": "POST",
@@ -98,22 +127,7 @@ FIREBASE_PRESET = {
         },
     ],
     "steps_scan": [
-        {
-            "name": "initUser",
-            "method": "POST",
-            "url": "{{base_url}}/initUser",
-            "headers": {"Content-Type": "application/json"},
-            "body": {"data": {"auth": "{{init_data}}", "session": "{{session_hash}}"}},
-            "expect_status": [200],
-            "extract": {
-                "game_state": "result",
-                "farm_ends_at": "result.passiveFarm.endsAt",
-                "is_premium": "result.isPremium",
-                "balance_coin": "result.gameStats.coin",
-                "balance_mcoin": "result.gameStats.mCoin",
-            },
-            "save": "state_raw",
-        },
+        INIT_USER_STEP,
     ],
 }
 
