@@ -56,7 +56,26 @@ doomsday discover    # поиск API игры (см. раздел 5)
 3. (Android 12+, опционально) отключите phantom process killer:
    `adb shell "settings put global settings_enable_monitor_phantom_procs false"`
    или через device_config (см. вики Termux);
-4. Установите **Termux:Boot** и один раз откройте его — boot-скрипт поднимет wake-lock, сервисы и сделает контрольный проход после перезагрузки.
+4. Установите **Termux:Boot** и один раз откройте его — подробности в разделе 3а.
+
+## 3а. Активация Termux:Boot (автозапуск после перезагрузки)
+
+1. Установите приложение **Termux:Boot** — APK с F-Droid или GitHub-releases
+   Termux. ВАЖНО: источник должен совпадать с источником самого Termux
+   (оба F-Droid или оба GitHub), иначе Android не даст им общаться.
+2. **Откройте Termux:Boot один раз** — при первом запуске он инициализируется
+   и запросит разрешения (Autostart/Notifications). После этого просто закройте.
+3. Положите boot-скрипт (установщик делает это сам, но можно и вручную):
+
+```bash
+mkdir -p ~/.termux/boot
+cp ~/doomsday-bot/boot/doomsday-boot.sh ~/.termux/boot/90-doomsday-boot.sh
+chmod +x ~/.termux/boot/90-doomsday-boot.sh
+```
+
+4. Перезагрузите телефон для проверки: Termux мелькнёт в фоне, wake-lock
+   возьмётся, сервисы поднимутся, и в журнале появится загрузочный проход
+   (`doomsday log`).
 
 ## 4. Как это работает
 
@@ -243,6 +262,17 @@ bash ~/doomsday-bot/install.sh
 
 ### Обновление кода на устройстве (git-путь)
 
+Всё сразу делает стартёр — обновление из GitHub + переустановка + сервисы:
+
+```bash
+sh ~/doomsday-bot/start.sh
+```
+
+Его же запускает Termux:Boot после перезагрузки телефона (раздел 3а),
+так что вручную запускать не обязательно.
+
+По шагам вручную (эквивалент):
+
 ```bash
 cd ~/doomsday-src
 git pull
@@ -252,8 +282,45 @@ bash install.sh                    # переустановка поверх: co
 Git-путь и zip-автообновление независимы: можно пользоваться любым (архив в
 Загрузках по-прежнему подхватывается автоматически раз в час).
 
+### Чтобы ассистент сам публиковал обновления в ваш репозиторий
+
+Если хотите, чтобы я публиковал новые версии прямо в ваш приватный
+репозиторий (а вы на телефоне просто делали `start.sh`), пришлите мне
+три вещи:
+
+1. **ваш username на GitHub** (например `vasya`);
+2. **имя приватного репозитория** (например `doomsday-bot`);
+3. **fine-grained personal access token** — создаётся так:
+   - GitHub → Settings → Developer settings → Personal access tokens →
+     **Fine-grained tokens** → Generate new token;
+   - Repository access: **Only select repositories** → выбрать `doomsday-bot`;
+   - Permissions → Repository permissions → **Contents: Read and write**
+     (остальные не нужны);
+   - Expiration: 90 дней или меньше;
+   - сгенерировать и скопировать токен (начинается с `github_pat_`).
+
+Безопасность: токен даёт доступ только к содержимому этого одного репо,
+отозвать можно в любой момент на той же странице (Delete). Не публикуйте
+его нигде, кроме личного сообщения мне. Помните: в репо лежит ваш
+`config.json` с api_id/api_hash — репозиторий должен оставаться PRIVATE.
+
 ## 13. История версий
 
+- **1.2.0** — КЛЮЧЕВОЙ ФИКС: raw-запросы к Telegram теперь идут с явной
+  конвертацией entity в InputPeer/InputUser (раньше уезжал «сырой» User —
+  из-за чего сервер отвечал BOT_APP_BOT_INVALID / «This is not a valid bot» /
+  URL_INVALID, хотя бот жив и верен); discover при любой ошибке сохраняет
+  диагностический отчёт reports/discovery-error-*.json вместо traceback;
+  тесты дополнены регрессией сериализации (constructor id проверки).
+- **1.1.0** — умный поиск бота игры: если в telegram.game_bot опечатка или
+  указан канал, движок сам находит настоящего бота (штатный @DoomsDayTyrannybot
+  → поиск по диалогам по шаблону doom/tyranny, включая архив), а `doomsday
+  discover` исправляет настройку автоматически; webview-URL теперь добывается
+  и через web-кнопку «Играть» из сообщений бота; перед discovery боту
+  отправляется /start (создаёт диалог и провоцирует кнопки);
+  стартёр `start.sh` — обновление из git-репозитория + переустановка +
+  сервисы одним запуском (его же использует Termux:Boot);
+  README: инструкции по активации Termux:Boot и GitHub-токену.
 - **1.0.2** — фикс падения `doomsday check` (NameError: os в engine.py);
   удалены неиспользуемые импорты; подготовка к git: .gitignore, перенос
   config.json из исходников при установке (клон на новом устройстве),

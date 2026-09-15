@@ -73,7 +73,7 @@ fi
 if [ "$SRC_DIR" = "$APP_DIR" ]; then
     warn "Исходники и установка — один и тот же каталог (git-клон напрямую): копирование пропущено"
 else
-    for entry in lib web bin boot service VERSION requirements.txt README.md install.sh update.sh uninstall.sh; do
+    for entry in lib web bin boot service VERSION requirements.txt README.md install.sh update.sh uninstall.sh start.sh; do
         [ -e "$SRC_DIR/$entry" ] || continue
         case "$entry" in
             lib|web|bin|boot|service)
@@ -83,7 +83,7 @@ else
         esac
     done
 fi
-chmod +x "$APP_DIR/bin/doomsday" "$APP_DIR/update.sh" "$APP_DIR/uninstall.sh" \
+chmod +x "$APP_DIR/bin/doomsday" "$APP_DIR/update.sh" "$APP_DIR/uninstall.sh" "$APP_DIR/start.sh" \
     "$APP_DIR/service/run" "$APP_DIR/boot/doomsday-boot.sh" 2>/dev/null
 mkdir -p "$APP_DIR/logs" "$APP_DIR/session" "$APP_DIR/reports" "$APP_DIR/.updates"
 chmod 700 "$APP_DIR/session" 2>/dev/null
@@ -174,6 +174,7 @@ echo "   4) браузер → http://127.0.0.1:8080"
 echo ""
 echo " Веб-панель:  $([ -d "$SVC_DIR" ] && echo "сервис doomsday-web (уже запущен)" || echo "doomsday web")"
 echo " Команды:     doomsday status | scan | reboot | log | update"
+echo " Стартер:     sh ~/doomsday-bot/start.sh   # git-обновление + запуск всего"
 echo ""
 echo " ⚠ Обязательно в Android: Настройки → Приложения → Termux →"
 echo "   Батарея → «Без ограничений» (иначе Android усыпит cron ночью)."

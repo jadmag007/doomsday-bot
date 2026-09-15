@@ -280,11 +280,27 @@ async def action_discover(cfg: dict) -> dict:
     client = await tgapi.connect(cfg)
     try:
         bot = await tgapi.get_bot(client, cfg)
+        # если нашли бота не по конфигу — исправляем настройку на будущее
+        real = (getattr(bot, "username", None) or "").strip()
+        configured = (cfg.get("telegram", {}).get("game_bot") or "").lstrip("@").strip()
+        if real and real.lower() != configured.lower():
+            cfg.setdefault("telegram", {})["game_bot"] = "@" + real
+            cfgmod.save(cfg)
+            db.event("config", "game_bot исправлен",
+                     json.dumps({"was": configured or "—", "now": "@" + real},
+                                ensure_ascii=False), severity="warning")
+        # /start боту: создаёт/обновляет диалог и провоцирует кнопки запуска игры
+        try:
+            await tgapi.send_start(client, bot, "/start")
+            await asyncio.sleep(2)
+        except Exception as e:
+            log.info("send_start(discover): %s", e)
         webview_url = await tgapi.resolve_webview_url(client, bot, cfg)
         report = tma.discover_endpoints(
             webview_url, timeout=int(cfg.get("tma", {}).get("timeout_seconds", 25))
         )
         report["webview_url"] = webview_url
+        report["game_bot"] = "@" + (real or "?")
         db.kv_set("discovery", report)
         db.event("discover", "Discovery API игры",
                  json.dumps({"endpoints": report.get("endpoints", [])[:30],

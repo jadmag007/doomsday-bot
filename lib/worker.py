@@ -201,7 +201,32 @@ def cmd_summary(args) -> int:
 
 def cmd_discover(args) -> int:
     cfg = cfgmod.load()
-    r = engine.run_coro(engine.action_discover(cfg))
+    try:
+        r = engine.run_coro(engine.action_discover(cfg))
+    except Exception as e:
+        # вместо traceback — диагностический отчёт для разбора
+        import traceback
+        os.makedirs(paths.REPORTS_DIR, exist_ok=True)
+        report = {
+            "error": f"{type(e).__name__}: {e}",
+            "traceback_tail": traceback.format_exc()[-4000:],
+            "game_bot": cfg.get("telegram", {}).get("game_bot"),
+            "app_short_name": cfg.get("telegram", {}).get("app_short_name"),
+            "time": db.now_iso(),
+        }
+        try:
+            with open(paths.VERSION_PATH, encoding="utf-8") as f:
+                report["version"] = f.read().strip()
+        except OSError:
+            report["version"] = "?"
+        out = os.path.join(paths.REPORTS_DIR,
+                           f"discovery-error-{db.now_iso().replace(':', '')}.json")
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+        print(f"✘ Discovery не удался: {type(e).__name__}: {e}")
+        print(f"  Диагностика сохранена: {out}")
+        print("  Пришлите этот файл ассистенту — он определит причину.")
+        return 1
     print(json.dumps(r, ensure_ascii=False, indent=2, default=str))
     out = os.path.join(paths.REPORTS_DIR, f"discovery-{db.now_iso().replace(':', '')}.json")
     with open(out, "w", encoding="utf-8") as f:
