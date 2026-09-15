@@ -70,6 +70,20 @@ DEFAULTS = {
         "pin": "",
         "open_on_start": True,  # doomsday start открывает панель в браузере
     },
+    "security": {
+        "night_mode": {
+            "enabled": False,
+            "from": "01:00",   # с этого часа и до "to" плановые действия не выполняются
+            "to": "07:00",
+        },
+        "jitter": {
+            "enabled": True,            # случайные отклонения всех интервалов (анти-паттерн)
+            "scan_percent": 15,        # разброс интервала скана ±%
+            "reboot_seconds": 180,     # смещение момента ребута ±сек (не ближе 60 с к концу)
+            "summary_minutes": 10,     # смещение времени сводки ±мин
+            "sell_pause": [0.4, 1.6],  # пауза между продажами, сек [min, max]
+        },
+    },
     "exchange": {
         "enabled": True,
         "rules": [
@@ -228,6 +242,31 @@ def validate(cfg: dict) -> list:
                         raise ValueError
                 except (TypeError, ValueError):
                     errs.append(f"exchange.rules[{i}].{num_key}: число от {lo} до {hi}")
+    # безопасность: ночной режим и джиттер
+    sec = cfg.get("security") or {}
+    nm = sec.get("night_mode") or {}
+    if nm.get("enabled"):
+        for k in ("from", "to"):
+            m = re.match(r"^(\d{1,2}):(\d{2})$", str(nm.get(k) or ""))
+            if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+                errs.append(f"security.night_mode.{k}: формат ЧЧ:ММ")
+        if nm.get("from") == nm.get("to"):
+            errs.append("security.night_mode: 'from' и 'to' не должны совпадать")
+    jt = sec.get("jitter") or {}
+    for num_key, lo, hi in (("scan_percent", 0, 50), ("reboot_seconds", 0, 600),
+                           ("summary_minutes", 0, 30)):
+        try:
+            v = float(jt.get(num_key) if jt.get(num_key) is not None else {"scan_percent": 15,
+                                                                           "reboot_seconds": 180,
+                                                                           "summary_minutes": 10}[num_key])
+            if not (lo <= v <= hi):
+                raise ValueError
+        except (TypeError, ValueError):
+            errs.append(f"security.jitter.{num_key}: число от {lo} до {hi}")
+    sp = jt.get("sell_pause")
+    if sp is not None and (not isinstance(sp, (list, tuple)) or len(sp) != 2
+                           or not all(isinstance(x, (int, float)) and 0 <= x <= 30 for x in sp)):
+        errs.append("security.jitter.sell_pause: пара чисел [min, max], сек")
     return errs
 
 

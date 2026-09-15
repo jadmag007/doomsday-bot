@@ -93,6 +93,7 @@ async function refreshOverview() {
   try {
     OV = await api("/api/overview");
     renderOverview(OV);
+    armTick(OV);
   } catch (e) {
     if (!String(e.message).includes("PIN")) toast("Обзор: " + e.message, true);
   }
@@ -116,11 +117,8 @@ function renderOverview(o) {
     st.className = "hdr-status " + (o.tma_configured ? "ok" : "err");
   }
 
-  // таймеры
+  // таймеры (скан переехал в статусбар сверху)
   const T = o.timers;
-  $("t-scan").textContent = fmtDur(T.scan_in_sec);
-  $("t-scan-sub").textContent = T.last_scan ? `последний: ${fmtTs(T.last_scan)} · каждые ${T.scan_interval_minutes}м` : "первый скан при следующем проходе";
-  $("t-scan-bar").style.width = pctOf(T.scan_in_sec, T.scan_interval_minutes * 60);
   // цикл производства (из API игры) + время авто-ребута
   const F = T.farm_cycle || {}, fEl = $("t-farm");
   fEl.style.color = "";
@@ -130,8 +128,9 @@ function renderOverview(o) {
     $("t-farm-bar").style.width = "0%";
   } else if (F.active) {
     fEl.textContent = fmtDur(F.left_sec);
+    const jit = F.reboot_jitter_sec ? `±${Math.round(F.reboot_jitter_sec / 60)} м` : "";
     $("t-farm-sub").textContent = `конец цикла: ${fmtTs(F.ends_at)}`
-      + (F.reboot_at ? ` · авто-ребут ~${fmtClock(F.reboot_at)}` : "");
+      + (F.reboot_at ? ` · авто-ребут ~${fmtClock(F.reboot_at)}${jit ? " " + jit : ""}` : "");
     $("t-farm-bar").style.width = pctOf(F.left_sec, F.total_sec || 12 * 3600);
   } else {
     fEl.textContent = "истёк";
@@ -143,7 +142,9 @@ function renderOverview(o) {
   renderResourcesState(o);
   renderTrackedDash(o);
   renderExchange(o);
+  renderStatusbar(o);
   renderEvents($("events"), o.events.slice(0, 8));
+  renderExLast(o.exchange && o.exchange.last || [], $("dash-exchanges"));
   renderTimersState(T, o);
 }
 
@@ -224,21 +225,24 @@ function renderResourcesState(o) {
   const box = $("resources");
   if (!box) return;
   const flt = new Set(o.resource_filter || RES_FILTER || []);
+  const ddtTracked = new Set(SELL_DDT_RIDS().filter(rid => flt.has(rid)));  // они — в статусбаре
   const lastTs = (o.resources[0] || {}).ts;
   $("res-ts").textContent = lastTs ? `· ${fmtTs(lastTs)}` : "";
-  const tracked = o.resources.filter(r => r.id && flt.has(r.id));
+  const tracked = o.resources.filter(r => r.id && flt.has(r.id) && !ddtTracked.has(r.id));
   const rest = o.resources.filter(r => !(r.id && flt.has(r.id)));
 
   // верхняя карточка: только отслеживаемые
   const tl = $("tracked-list");
   if (tl) {
+    const ddtHint = ddtTracked.size ? `Отслеживаемые DDT-ресурсы (${ddtTracked.size} шт.) показаны в статусбаре сверху.` : "";
     if (!flt.size) {
       tl.innerHTML = `<div class="tracked-hint">Выбор не задан — уведомления приходят по <b>всем</b> ${o.resources.length || 40}+ ресурсам.
         Отметьте нужные в блоке «Выбор ресурсов», чтобы получать пуш только по ним.</div>`;
     } else if (!tracked.length) {
-      tl.innerHTML = `<div class="muted">Данных ещё нет — появится после первого скана.</div>`;
+      tl.innerHTML = `<div class="muted">${ddtHint || "Данных ещё нет — появится после первого скана."}</div>`;
     } else {
-      tl.innerHTML = tracked.map(r => resRow(r)).join("");
+      tl.innerHTML = tracked.map(r => resRow(r)).join("")
+        + (ddtHint ? `<div class="muted" style="margin-top:.35rem">${ddtHint}</div>` : "");
     }
     const tc = $("tracked-count");
     if (tc) tc.textContent = flt.size ? `· ${flt.size}` : "";
@@ -254,18 +258,19 @@ function renderResourcesState(o) {
   box.innerHTML = rest.map(r => resRow(r)).join("");
 }
 
-/* мини-список отслеживаемых на дашборде */
+/* мини-список отслеживаемых на дашборде (DDT-продающиеся — в статусбаре) */
 function renderTrackedDash(o) {
   const card = $("dash-tracked-card"), box = $("dash-tracked");
   if (!card || !box) return;
   const flt = new Set(o.resource_filter || RES_FILTER || []);
   if (!flt.size) { card.classList.add("hidden"); return; }
   card.classList.remove("hidden");
-  const tracked = (o.resources || []).filter(r => r.id && flt.has(r.id));
+  const ddtTracked = new Set(SELL_DDT_RIDS().filter(rid => flt.has(rid)));
+  const tracked = (o.resources || []).filter(r => r.id && flt.has(r.id) && !ddtTracked.has(r.id));
   $("dash-tracked-count").textContent = `· ${flt.size}`;
   box.innerHTML = tracked.length
     ? tracked.map(r => resRow(r)).join("")
-    : `<div class="muted">Данных ещё нет — появится после первого скана.</div>`;
+    : `<div class="muted">Отслеживаются только DDT-ресурсы — их таймер в статусбаре сверху.</div>`;
 }
 
 /* ================= автообмен / продажа ================= */
@@ -357,10 +362,10 @@ function updateExRow(row) {
   row.classList.toggle("off", mode === "off");
 }
 
-function renderExLast(items) {
-  const el = $("ex-last");
+function renderExLast(items, el) {
+  el = el || $("ex-last");
   if (!el) return;
-  if (!items.length) {
+  if (!items || !items.length) {
     el.innerHTML = `<div class="muted">Обменов ещё не было.</div>`;
     return;
   }
@@ -397,6 +402,7 @@ $("save-exchange").addEventListener("click", async () => {
 });
 
 $("dash-to-res").addEventListener("click", () => openTab("res"));
+$("dash-to-ex").addEventListener("click", () => { openTab("res"); document.getElementById("exchange-card").scrollIntoView({ behavior: "smooth", block: "start" }); });
 $("res-toggle-rest").addEventListener("click", () => {
   const box = $("resources");
   box.classList.toggle("collapsed");
@@ -469,17 +475,101 @@ $("save-res-filter").addEventListener("click", async () => {
   } catch (e) { setMsg("res-msg", e.message, true); }
 });
 
-/* тикеры обратного отсчёта */
-setInterval(() => {
-  if (!OV) return;
-  const T = OV.timers;
-  if (T.scan_in_sec != null) $("t-scan").textContent = fmtDur(T.scan_in_sec - 1);
-  const F = T.farm_cycle || {};
-  if (F.left_sec != null) {
-    const el = $("t-farm");
-    if (F.active) el.textContent = fmtDur(F.left_sec - 1);
-    else { el.textContent = "истёк"; el.style.color = "var(--danger)"; }
+/* ================= статусбар (верх панели) ================= */
+const SELL_DDT_RIDS = () => ((OV && OV.exchange && OV.exchange.sellable) || [])
+  .filter(s => s.is_ddt).map(s => s.id);
+
+function fmtShort(sec) {
+  if (sec == null || isNaN(sec)) return "--:--";
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  if (h > 99) return `${h}ч`;
+  return h > 0 ? `${h}ч ${pad(m)}м` : `${pad(m)}:${pad(s)}`;
+}
+
+function renderStatusbar(o) {
+  const T = o.timers || {};
+  // скан-таймер (+ здоровье cron: проходы живы?)
+  const scanChip = $("sb-scan");
+  if (scanChip) {
+    $("sb-scan-t").textContent = fmtShort(T.scan_in_sec);
+    const cronOk = T.cron_alive !== false;  // нет данных — не пугаем
+    scanChip.classList.toggle("stale", !cronOk);
+    scanChip.title = cronOk
+      ? `До следующего скана · последний проход cron: ${fmtTs(T.last_cron_ts) || "?"}`
+      : `Проходы cron не видны больше 25 минут — автоматизация стоит! ` +
+        `Проверьте: doomsday status, затем doomsday start`;
   }
+  // ETA DDT-продающихся ресурсов (только отслеживаемые — они живут здесь, а не в списке)
+  const ddtChip = $("sb-ddt");
+  if (ddtChip) {
+    const flt = new Set(o.resource_filter || RES_FILTER || []);
+    const eta = o.ddt_eta || {};
+    const rids = SELL_DDT_RIDS().filter(rid => flt.has(rid));
+    const byRid = {};
+    (o.resources || []).forEach(r => { if (r.id) byRid[r.id] = r; });
+    const sell = {};
+    ((o.exchange && o.exchange.sellable) || []).forEach(s => { sell[s.id] = s; });
+    if (!rids.length) {
+      ddtChip.classList.add("hidden");
+    } else {
+      ddtChip.classList.remove("hidden");
+      const rid = rids[0];  // основной — первый отслеживаемый DDT-ресурс
+      const it = eta[rid] || {};
+      const res = byRid[rid];
+      $("sb-ddt-img").src = `assets/items/${esc(rid)}.webp`;
+      $("sb-ddt-name").textContent = rid === "uran_pills" ? "UO2" : (sell[rid] ? sell[rid].name : rid);
+      $("sb-ddt-eta").textContent = it.eta_sec != null ? fmtShort(it.eta_sec)
+        : (it.note || "—");
+      $("sb-ddt-count").textContent = res && res.max != null
+        ? `${fmtNum(res.current)}/${fmtNum(res.max)}` : "";
+      const jit = (it.eta_sec != null && o.security && o.security.jitter_enabled) ? " ~" : "";
+      ddtChip.title = rid === "uran_pills"
+        ? `До следующей урановой таблетки (840 урана на штуку, 1 ч производство)${jit} — расчёт по доходу урана`
+        : `До следующей единицы: ${sell[rid] ? sell[rid].name : rid}`;
+    }
+  }
+  // ночной режим
+  const nightChip = $("sb-night");
+  if (nightChip) {
+    const sec = o.security || {};
+    if (sec.night_active) {
+      nightChip.classList.remove("hidden");
+      $("sb-night-t").textContent = `ночь до ${sec.night_to || "?"}`;
+    } else {
+      nightChip.classList.add("hidden");
+    }
+  }
+}
+
+/* тикеры: локальный отсчёт с моментального снимка OV (секунды реально бегут) */
+let TICK = null;
+function armTick(o) {
+  const T = o.timers || {};
+  const F = T.farm_cycle || {};
+  const eta = (o.ddt_eta || {});
+  const flt = new Set(o.resource_filter || RES_FILTER || []);
+  let ddtEta = null;
+  for (const rid of SELL_DDT_RIDS()) {
+    if (flt.has(rid) && eta[rid] && eta[rid].eta_sec != null) { ddtEta = eta[rid].eta_sec; break; }
+  }
+  TICK = {
+    at: Date.now(),
+    scan: T.scan_in_sec,
+    farm: F.active ? F.left_sec : null,
+    ddt: ddtEta,
+  };
+}
+
+setInterval(() => {
+  if (!TICK) return;
+  const el = Math.floor((Date.now() - TICK.at) / 1000);
+  if (TICK.scan != null) { const e = $("sb-scan-t"); if (e) e.textContent = fmtShort(TICK.scan - el); }
+  if (TICK.farm != null) {
+    const e = $("t-farm");
+    if (e && e.textContent !== "истёк") e.textContent = fmtDur(TICK.farm - el);
+  }
+  if (TICK.ddt != null) { const e = $("sb-ddt-eta"); if (e && e.textContent !== "—") e.textContent = fmtShort(TICK.ddt - el); }
 }, 1000);
 
 /* каждые 30 сек — обновление обзора; каждую секунду — локальные тикеры */
@@ -515,15 +605,21 @@ function renderTimersState(T, o) {
   else farmLine = `<b>Цикл производства:</b> <span style="color:var(--danger)">ИСТЁК — ребут в ближайший проход</span>`;
   let rbLine = "";
   if (F.known && F.active && F.reboot_at) {
-    rbLine = `<div><b>Следующий авто-ребут:</b> ${fmtTs(F.reboot_at)} — за ${F.before_min ?? 10} мин до конца цикла, фарм не прерывается</div>`;
+    const jit = F.reboot_jitter_sec ? ` ±${Math.round(F.reboot_jitter_sec / 60)} мин` : "";
+    rbLine = `<div><b>Следующий авто-ребут:</b> ${fmtTs(F.reboot_at)}${jit} — за ${F.before_min ?? 10} мин до конца цикла, фарм не прерывается; проход cron дождётся точного момента</div>`;
   } else if (F.known && !F.active) {
     rbLine = `<div><b>Следующий авто-ребут:</b> ближайший проход cron (цикл уже истёк)</div>`;
   }
+  const cronLine = T.last_cron_ts
+    ? `<div><b>Последний проход cron:</b> ${fmtTs(T.last_cron_ts)} — ${T.cron_alive === false
+        ? `<span style="color:var(--danger)">давно (автоматизация стоит?)</span>` : "норма"}</div>`
+    : `<div><b>Последний проход cron:</b> нет данных</div>`;
   el.innerHTML = `
     <div>${farmLine}</div>
     ${rbLine}
+    ${cronLine}
     <div><b>Последний ребут:</b> ${fmtTs(T.last_reboot)}</div>
-    <div><b>Последний скан:</b> ${fmtTs(T.last_scan)} → следующий ${fmtTs(T.next_scan)}</div>
+    <div><b>Последний скан:</b> ${fmtTs(T.last_scan)} → следующий ${fmtTs(T.next_scan)}${(o.security && o.security.jitter_enabled) ? " (±разброс)" : ""}</div>
     <div><b>Сводка дня:</b> ${T.last_summary ? T.last_summary : "ещё не было"}</div>
     <div><b>API игры:</b> ${o.tma_preset ? "встроенный пресет (Firebase)" : "кастомные шаги"} · ${esc(o.tma_base_url || "?")}</div>`;
 }
@@ -608,7 +704,7 @@ async function loadConfigIntoForms() {
 
 function fillForms(c) {
   const tg = c.telegram || {}, sc = c.schedules || {}, nf = c.notify || {},
-        wb = c.web || {}, ch = c.chat || {}, tm = c.tma || {};
+        wb = c.web || {}, ch = c.chat || {}, tm = c.tma || {}, sec = c.security || {};
   // таймеры
   $("f-before-min").value = sc.reboot_before_end_minutes ?? 10;
   $("f-scan-min").value = sc.scan_interval_minutes ?? 60;
@@ -637,6 +733,15 @@ function fillForms(c) {
   $("f-web-port").value = wb.port ?? 8080;
   $("f-web-pin").value = "";
   $("f-web-pin").placeholder = wb.pin ? "задан (введите новый, чтобы сменить)" : "пусто = без PIN";
+  // безопасность
+  const nm = sec.night_mode || {}, jt = sec.jitter || {};
+  $("f-night-enabled").checked = !!nm.enabled;
+  $("f-night-from").value = nm.from || "01:00";
+  $("f-night-to").value = nm.to || "07:00";
+  $("f-jitter-enabled").checked = jt.enabled !== false;
+  $("f-jitter-scan").value = jt.scan_percent ?? 15;
+  $("f-jitter-reboot").value = jt.reboot_seconds ?? 180;
+  $("f-jitter-summary").value = jt.summary_minutes ?? 10;
   // TMA
   $("f-tma-base").value = tm.base_url || "";
   $("f-tma-timeout").value = tm.timeout_seconds ?? 25;
@@ -833,6 +938,20 @@ $("save-settings").addEventListener("click", async () => {
       warn_threshold_pct: num($("f-warn-pct").value, 90, 50, 100),
       open_game_button: $("f-open-game").checked,
       events, priority_high: c.notify.priority_high || ["resource_full", "errors"],
+    };
+    c.security = {
+      night_mode: {
+        enabled: $("f-night-enabled").checked,
+        from: $("f-night-from").value || "01:00",
+        to: $("f-night-to").value || "07:00",
+      },
+      jitter: {
+        ...(c.security && c.security.jitter || {}),
+        enabled: $("f-jitter-enabled").checked,
+        scan_percent: num($("f-jitter-scan").value, 15, 0, 50),
+        reboot_seconds: num($("f-jitter-reboot").value, 180, 0, 600),
+        summary_minutes: num($("f-jitter-summary").value, 10, 0, 30),
+      },
     };
     c.web = {
       host: $("f-web-host").value.trim() || "127.0.0.1",

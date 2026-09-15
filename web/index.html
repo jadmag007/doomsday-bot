@@ -32,6 +32,23 @@
   <div id="hdr-status" class="hdr-status">…</div>
 </header>
 
+<!-- компактный статусбар: таймер скана, ETA DDT-ресурсов, ночной режим -->
+<div class="statusbar" id="statusbar">
+  <div class="sb-chip" id="sb-scan" title="До следующего скана ресурсов">
+    <svg class="sb-ico" viewBox="0 0 16 16" width="11" height="11" fill="none" aria-hidden="true">
+      <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" stroke="currentColor" stroke-width="1.8" stroke-linecap="square"/>
+      <path d="M12.2 1.6v2.8h-2.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="square" stroke-linejoin="miter"/>
+    </svg><span id="sb-scan-t">--:--</span>
+  </div>
+  <div class="sb-chip sb-ddt hidden" id="sb-ddt" title="До следующей урановой таблетки (продажа за DDT)">
+    <img class="sb-img" id="sb-ddt-img" src="assets/items/uran_pills.webp" alt="">
+    <span id="sb-ddt-name">UO2</span>
+    <span class="sb-eta" id="sb-ddt-eta">—</span>
+    <span class="sb-count" id="sb-ddt-count"></span>
+  </div>
+  <div class="sb-chip sb-night hidden" id="sb-night" title="Ночной режим: плановых действий нет">🌙 <span id="sb-night-t">ночь</span></div>
+</div>
+
 <!-- баннер: процесс панели старше кода на диске (лечится перезапуском) -->
 <div id="stale-banner" class="stale-banner hidden">
   <div class="stale-text">⚠ Код обновлён до <b>v<span id="stale-want">?</span></b>, но панель всё ещё
@@ -63,12 +80,6 @@
       <div class="card-sub" id="t-farm-sub">нет данных</div>
       <div class="progress"><div class="progress-bar" id="t-farm-bar" style="width:0%"></div></div>
     </div>
-    <div class="card timer-card">
-      <div class="card-label">Следующий скан ресурсов</div>
-      <div class="timer" id="t-scan">--:--:--</div>
-      <div class="card-sub" id="t-scan-sub">нет данных</div>
-      <div class="progress"><div class="progress-bar green" id="t-scan-bar" style="width:0%"></div></div>
-    </div>
   </div>
 
   <div class="card" id="dash-tracked-card">
@@ -94,6 +105,14 @@
   <div class="card">
     <div class="card-head"><div class="card-label">Последние события</div></div>
     <div id="events" class="events"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-label">Автообмены</div>
+      <button id="dash-to-ex" class="btn small">Настроить →</button>
+    </div>
+    <div id="dash-exchanges" class="ex-last"></div>
   </div>
 </section>
 
@@ -221,6 +240,31 @@
       <label class="check"><input id="f-notify-enabled" type="checkbox"> Push-уведомления включены</label>
       <label class="check"><input id="f-open-game" type="checkbox"> Кнопка «Открыть игру» в уведомлениях</label>
     </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">Безопасность</div>
+    <div class="checks-grid">
+      <label class="check"><input id="f-night-enabled" type="checkbox"> Ночной режим</label>
+      <label class="check"><input id="f-jitter-enabled" type="checkbox"> Разброс интервалов</label>
+    </div>
+    <div class="form-grid three">
+      <label>Ночь с <span class="hint">(ЧЧ:ММ)</span>
+        <input id="f-night-from" type="time"></label>
+      <label>до <span class="hint">(ЧЧ:ММ)</span>
+        <input id="f-night-to" type="time"></label>
+      <label>Разброс скана, % <span class="hint">(± от интервала)</span>
+        <input id="f-jitter-scan" type="number" min="0" max="50" step="1"></label>
+    </div>
+    <div class="form-grid three">
+      <label>Отклонение ребута, сек <span class="hint">(± от момента)</span>
+        <input id="f-jitter-reboot" type="number" min="0" max="600" step="10"></label>
+      <label>Отклонение сводки, мин
+        <input id="f-jitter-summary" type="number" min="0" max="30" step="1"></label>
+    </div>
+    <div class="note">Ночной режим — плановые действия (скан/ребут/обмен/сводка) не выполняются,
+      бот «спит» как человек. Разброс интервалов — псевдослучайные отклонения, чтобы
+      моменты запросов не повторялись (анти-паттерн автоматизации).</div>
   </div>
 
   <div class="card">

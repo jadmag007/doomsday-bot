@@ -180,6 +180,36 @@ CURRENCY_RU = {
     "ddt": "DDT",
 }
 
+# Время производства одной единицы, сек (из JS-бандла игры, поле produceTime).
+PRODUCE_TIME = {
+    "cassete": 180,
+    "floppy": 1800,
+    "hdd": 1800,
+    "u235": 3600,
+    "uran_pills": 3600,
+    "ddt_res": 1,
+}
+
+# Входные ресурсы на одну единицу (поле craftResource).
+CRAFT_COST = {
+    "cassete": [("alloy1", 10)],
+    "floppy": [("aluminum", 10)],
+    "hdd": [("aluminum", 5), ("microcircuit1", 2), ("silicon", 15)],
+    "u235": [("uranus", 3300)],
+    "uran_pills": [("uranus", 840)],
+    "ddt_res": [],
+}
+
+
+def produce_time(rid: str) -> int:
+    """Секунды на производство единицы (0 — неизвестно)."""
+    return PRODUCE_TIME.get(rid, 0)
+
+
+def craft_cost(rid: str) -> list:
+    """[(rid входного ресурса, количество на единицу)]."""
+    return CRAFT_COST.get(rid, [])
+
 
 def sell_unit(rid: str):
     """(цена за единицу, is_ddt) для продаваемого ресурса; None — не продаётся."""

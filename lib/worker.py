@@ -24,6 +24,7 @@ from . import db
 from . import notify as notify_mod
 from . import paths
 from . import engine
+from . import timing
 
 log = logging.getLogger("doomsday")
 
@@ -87,13 +88,13 @@ def _ts(key):
 
 
 def _due(now, cfg: dict, name: str) -> bool:
-    """Настало ли время действия: интервал истёк и не слишком рано после ошибки."""
+    """Настало ли время действия: джиттерный интервал истёк и не слишком рано после ошибки."""
     sch = cfg.get("schedules", {})
     if name == "reboot":
-        interval = float(sch.get("reboot_interval_hours", 12) or 12) * 3600
+        interval = timing.fallback_reboot_interval_sec(cfg, _iso_raw("last_reboot_ts"))
         last_ok = _ts("last_reboot_ts")
     elif name == "scan":
-        interval = int(sch.get("scan_interval_minutes", 60) or 60) * 60
+        interval = timing.scan_interval_sec(cfg, _iso_raw("last_scan_ts"))
         last_ok = _ts("last_scan_ts")
     else:
         return True
@@ -107,14 +108,18 @@ def _due(now, cfg: dict, name: str) -> bool:
     return True
 
 
+def _iso_raw(key: str):
+    """Сырое значение kv-таймстемпа (seed для джиттера, без парсинга)."""
+    return db.kv_get(key)
+
+
 def _reboot_due_cycle(cfg: dict, now) -> bool:
     """Пора ли ребутить производство — по игровому циклу.
 
-    Основной режим: reboot_before_end_minutes до конца цикла игры
-    (passive_farm_ends_at из скана/ребута) — фарм не прерывается.
-    Если цикл уже истёк — ребут немедленно (окно пропущено).
-    Если данных о цикле нет (скан не давал passiveFarm) — запасная
-    логика по интервалу от последнего ребута (режим без TMA).
+    Основной режим: окно открывается за reboot_before_end минут до конца цикла
+    (passive_farm_ends_at из скана/ребута) со стабильным джиттером ±сек —
+    фарм не прерывается. Если цикл уже истёк — ребут немедленно (окно пропущено).
+    Если данных о цикле нет — запасная логика по джиттерному интервалу.
     """
     sch = cfg.get("schedules", {})
     ends_raw = db.kv_get("passive_farm_ends_at")
@@ -133,8 +138,8 @@ def _reboot_due_cycle(cfg: dict, now) -> bool:
     if guard_sec is not None and abs(guard_sec - ends_sec) < 1 \
             and now.timestamp() < ends_sec + 3600:
         return False
-    before_min = int(sch.get("reboot_before_end_minutes", 10) or 0)
-    if now.timestamp() < ends_sec - before_min * 60:
+    before_sec = timing.reboot_before_sec(cfg, ends_raw)
+    if now.timestamp() < ends_sec - before_sec:
         return False  # окно ребута ещё не открылось
     # окно открыто (или цикл истёк) — но не чаще, чем разрешает троттлинг ошибок
     retry = int(sch.get("retry_failed_minutes", 20) or 20) * 60
@@ -142,6 +147,28 @@ def _reboot_due_cycle(cfg: dict, now) -> bool:
     if last_fail is not None and (now - last_fail).total_seconds() < retry:
         return False
     return True
+
+
+def _reboot_wait_sec(cfg: dict, now) -> float:
+    """Сколько секунд до открытия окна ребута (0 — уже открыто/истекло).
+
+    Нужно для ТОЧНОГО срабатывания: cron ходит каждые 10 минут, и без этого
+    окно «за 10 мин до конца» фактически стреляло на следующем проходе —
+    впритык к концу цикла. Проход, который видит, что окно откроется в течение
+    10 минут, засыпает до точного момента (с джиттером) и ребутит вовремя.
+    """
+    ends_raw = db.kv_get("passive_farm_ends_at")
+    try:
+        ends_sec = float(ends_raw) / 1000.0 if ends_raw else None
+    except (TypeError, ValueError):
+        return 0.0
+    if ends_sec is None:
+        return 0.0
+    before_sec = timing.reboot_before_sec(cfg, ends_raw)
+    wait = (ends_sec - before_sec) - now.timestamp()
+    if wait <= 0 or wait > 570:  # дальше — пусть стреляет следующий проход
+        return 0.0
+    return wait
 
 
 def _fmt_delta(sec) -> str:
@@ -154,9 +181,42 @@ def _fmt_delta(sec) -> str:
 
 # ---------------- cron-планировщик ----------------
 
+def _cron_watchdog(seconds: int = 900) -> None:
+    """Сторожевой таймер прохода cron: зависший проход убивается через N секунд.
+
+    Раньше зависший (например, на сети) проход держал блокировку вечно —
+    следующие проходы стояли в очереди, и ни ребут, ни скан не выполнялись.
+    SIGALRM прерывает даже висящий сетевой вызов; процесс умирает, лок
+    освобождается, следующий проход (через 10 мин) работает.
+    """
+    import signal
+
+    def _boom(signum, frame):
+        raise TimeoutError(f"проход cron прерван сторожевым таймером ({seconds} с)")
+
+    try:
+        signal.signal(signal.SIGALRM, _boom)
+        signal.alarm(seconds)
+    except (ValueError, OSError):
+        pass
+
+
 def cmd_cron(args) -> int:
     cfg = cfgmod.load()
     now = datetime.datetime.now()
+    db.kv_set("last_cron_ts", db.now_iso())
+    _cron_watchdog(900)
+
+    # ночной режим: плановых действий нет, бот «спит»
+    if timing.night_active(cfg, now):
+        if db.kv_get("night_skip_date") != now.date().isoformat():
+            db.kv_set("night_skip_date", now.date().isoformat())
+            nm = (cfg.get("security") or {}).get("night_mode") or {}
+            db.event("cron", "Ночной режим",
+                     f"Плановые действия приостановлены до утра "
+                     f"(окно {nm.get('from')}–{nm.get('to')})")
+            print(f"[cron] {db.now_iso()} ночной режим — плановые действия пропущены")
+        return 0
 
     actions = []
     # 1) ребут производства — по игровому циклу (за N минут до конца)
@@ -165,14 +225,30 @@ def cmd_cron(args) -> int:
     # 2) скан ресурсов
     if _due(now, cfg, "scan"):
         actions.append("scan")
-    # 3) сводка дня
+    # 3) сводка дня (время — со стабильным джиттером по дню)
     st = str(cfg.get("schedules", {}).get("summary_time") or "20:00")
     m = re.match(r"^(\d{1,2}):(\d{2})$", st)
     if m:
         hh, mm = int(m.group(1)), int(m.group(2))
-        due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        off = timing.summary_minute_offset(cfg, now.date().isoformat())
+        due = now.replace(hour=hh, minute=mm, second=0, microsecond=0) \
+            + datetime.timedelta(minutes=off)
         if now >= due and db.kv_get("last_summary_date") != now.date().isoformat():
             actions.append("summary")
+
+    # точное срабатывание ребута: если окно откроется до следующего прохода —
+    # дожидаемся его в этом проходе (гранулярность cron больше не решает)
+    if "reboot" not in actions:
+        wait = _reboot_wait_sec(cfg, now)
+        if wait > 0:
+            print(f"[cron] окно ребута через {int(wait)} с — ожидаю точный момент…")
+            try:
+                import time as _t
+                _t.sleep(wait)
+            except (TimeoutError, InterruptedError):
+                pass
+            if _reboot_due_cycle(cfg, datetime.datetime.now()):
+                actions.insert(0, "reboot")
 
     print(f"[cron] {db.now_iso()} план: {actions or 'ничего не подошло'}")
     for name in actions:
@@ -392,6 +468,23 @@ def cmd_status(args) -> int:
     if ex.get("enabled", True) and (ex.get("rules") or []):
         on = [str(r.get("rid")) for r in ex["rules"] if r.get("enabled", True)]
         print(f"Автообмен:            вкл ({', '.join(on) if on else 'правил нет'})")
+    eta = db.kv_get("ddt_eta") or {}
+    for rid, it in eta.items():
+        if it.get("eta_sec") is not None:
+            print(f"До следующей ед. {game_data.ru_name(rid, rid)}: "
+                  f"{_fmt_delta(it['eta_sec'])}")
+    last_cron = _ts("last_cron_ts")
+    print(f"Последний проход cron: {_fmt_delta((now - last_cron).total_seconds()) if last_cron else 'нет данных'}")
+    if timing.night_active(cfg, now):
+        nm = (cfg.get("security") or {}).get("night_mode") or {}
+        print(f"Ночной режим:         АКТИВЕН (до {nm.get('to')}) — плановых действий нет")
+    elif ((cfg.get("security") or {}).get("night_mode") or {}).get("enabled"):
+        nm = cfg["security"]["night_mode"]
+        print(f"Ночной режим:         вкл, окно {nm.get('from')}–{nm.get('to')}")
+    jt = ((cfg.get("security") or {}).get("jitter") or {})
+    if jt.get("enabled", True):
+        print(f"Джиттер интервалов:   вкл (скан ±{jt.get('scan_percent', 15)}%, "
+              f"ребут ±{jt.get('reboot_seconds', 180)} с)")
     url = starter_mod.panel_url(cfg)
     print(f"Веб-панель:          {url}")
     print("Открыть панель:      doomsday panel")
@@ -708,6 +801,89 @@ def cmd_selftest(args) -> int:
                 check("валидация принимает дефолтные правила",
                       lambda: (not [e for e in cfgmod.validate(cfgmod.DEFAULTS)
                                     if e.startswith("exchange")], ""))
+
+                print("selftest: безопасность — ночной режим и джиттер")
+                from . import timing
+                import datetime as _dt
+                cfg_n = cfgmod._deep_merge(cfgmod.DEFAULTS, {})
+                check("ночь выключена по умолчанию",
+                      lambda: (timing.night_active(cfg_n, _dt.datetime(2026, 1, 1, 3, 0)) is False, ""))
+                cfg_n2 = cfgmod._deep_merge(cfgmod.DEFAULTS, {"security": {"night_mode": {
+                    "enabled": True, "from": "01:00", "to": "07:00"}}})
+                check("окно 01–07: в 03:00 ночь",
+                      lambda: (timing.night_active(cfg_n2, _dt.datetime(2026, 1, 1, 3, 0)) is True, ""))
+                check("окно 01–07: в 12:00 день",
+                      lambda: (timing.night_active(cfg_n2, _dt.datetime(2026, 1, 1, 12, 0)) is False, ""))
+                check("окно 01–07: в 00:30 день",
+                      lambda: (timing.night_active(cfg_n2, _dt.datetime(2026, 1, 1, 0, 30)) is False, ""))
+                cfg_n3 = cfgmod._deep_merge(cfgmod.DEFAULTS, {"security": {"night_mode": {
+                    "enabled": True, "from": "23:00", "to": "06:00"}}})
+                check("окно через полночь: 23:30 ночь",
+                      lambda: (timing.night_active(cfg_n3, _dt.datetime(2026, 1, 1, 23, 30)) is True, ""))
+                check("окно через полночь: 05:59 ночь",
+                      lambda: (timing.night_active(cfg_n3, _dt.datetime(2026, 1, 1, 5, 59)) is True, ""))
+                check("окно через полночь: 06:00 день",
+                      lambda: (timing.night_active(cfg_n3, _dt.datetime(2026, 1, 1, 6, 0)) is False, ""))
+                f1 = timing.jitter_factor("seed-1", 15)
+                check("джиттер-фактор стабилен и в диапазоне",
+                      lambda: (f1 == timing.jitter_factor("seed-1", 15) and 0.85 <= f1 <= 1.15, f"{f1:.3f}"))
+                check("джиттер-фактор различается по seed",
+                      lambda: (len({round(timing.jitter_factor(f"s{i}", 15), 4) for i in range(20)}) > 10, ""))
+                check("джиттер 0% — ровно 1.0",
+                      lambda: (timing.jitter_factor("x", 0) == 1.0, ""))
+                b1 = timing.reboot_before_sec(cfgmod.DEFAULTS, "1757900000000")
+                check("окно ребута с джиттером в диапазоне 7–13 мин",
+                      lambda: (7 * 60 <= b1 <= 13 * 60, f"{b1:.0f} с"))
+                cfg_tight = cfgmod._deep_merge(cfgmod.DEFAULTS, {
+                    "schedules": {"reboot_before_end_minutes": 1},
+                    "security": {"jitter": {"enabled": True, "reboot_seconds": 600}}})
+                check("окно ребута не ближе 60 с к концу цикла",
+                      lambda: (timing.reboot_before_sec(cfg_tight, "1757900000000") >= 60, ""))
+                cfg_off = cfgmod._deep_merge(cfgmod.DEFAULTS, {"security": {"jitter": {"enabled": False}}})
+                check("джиттер выключен — окно ровно 10 мин",
+                      lambda: (timing.reboot_before_sec(cfg_off, "1757900000000") == 600.0, ""))
+                scan_j = timing.scan_interval_sec(cfgmod.DEFAULTS, "2026-09-15T17:19:00")
+                check("интервал скана с джиттером ±15%",
+                      lambda: (60 * 60 * 0.85 <= scan_j <= 60 * 60 * 1.15,
+                               f"{scan_j/60:.1f} мин"))
+                check("валидация ловит кривое окно ночи",
+                      lambda: (any("night_mode" in e for e in cfgmod.validate(cfgmod._deep_merge(
+                          cfgmod.DEFAULTS, {"security": {"night_mode": {
+                              "enabled": True, "from": "25:00", "to": "07:00"}}}))), ""))
+                check("валидация принимает дефолтную безопасность",
+                      lambda: (not [e for e in cfgmod.validate(cfgmod.DEFAULTS)
+                                    if e.startswith("security")], ""))
+
+                print("selftest: ETA DDT-ресурсов (урановые таблетки)")
+                res4 = [
+                    {"name": "Урановые таблетки", "id": "uran_pills", "current": 2, "max": 24,
+                     "state": "", "craft_info": {"progress": 0, "craft": 1 / 60.0,
+                                                 "craft_real": 0.1 / 60.0, "workers": 1}},
+                    {"name": "Уран", "id": "uranus", "current": 50, "max": 118800,
+                     "state": "", "craft_info": {"progress": 0, "craft": 84 / 60.0,
+                                                 "craft_real": 84 / 60.0, "workers": 30}},
+                ]
+                eta = engine.compute_ddt_eta(res4)
+                pills = eta.get("uran_pills") or {}
+                # реальная скорость 0.1/ч → полная единица ~10 ч = 36000 с (±округление)
+                check("ETA по реальной скорости (0.1/ч → ~10 ч)",
+                      lambda: (35990 <= (pills.get("eta_sec") or 0) <= 36010,
+                               str(pills.get("eta_sec"))))
+                res4[0]["craft_info"] = {"progress": 1800, "craft": 1 / 60.0,
+                                         "craft_real": 0, "workers": 1}
+                eta2 = engine.compute_ddt_eta(res4)
+                pills2 = eta2.get("uran_pills") or {}
+                # прогресс 1800/3600 → нужно ещё 420 урана, есть 50, доход 84/ч →
+                # дефицит 370 / 84 ч ≈ 4.4 ч ≈ 15 857 с
+                check("ETA по доходу урана при остановке",
+                      lambda: (15840 <= (pills2.get("eta_sec") or 0) <= 15880,
+                               str(pills2.get("eta_sec"))))
+                res5 = [{"name": "Урановые таблетки", "id": "uran_pills", "current": 0, "max": 24,
+                         "state": "", "craft_info": {"progress": 0, "craft": None,
+                                                     "craft_real": None, "workers": 0}}]
+                eta3 = engine.compute_ddt_eta(res5)
+                check("простаивает — ETA нет",
+                      lambda: ((eta3.get("uran_pills") or {}).get("eta_sec") is None, ""))
             finally:
                 engine.notify_mod.notify = orig_notify
         finally:
@@ -755,7 +931,10 @@ def main(argv=None) -> int:
 
     setup_logging(verbose=os.environ.get("DOOMSDAY_VERBOSE") == "1")
 
-    wait_lock = args.cmd in ("reboot", "scan", "cron")
+    # cron — НЕ блокирующийся: предыдущий проход ещё жив → тихо выходим
+    # (иначе зависший проход навсегда останавливает всю автоматизацию);
+    # ручные reboot/scan/exchange — ждут своей очереди
+    wait_lock = args.cmd in ("reboot", "scan", "exchange")
     no_lock = {"web": cmd_web, "panel": cmd_panel, "selftest": cmd_selftest, "setup": cmd_setup,
                "status": cmd_status, "log": cmd_log, "test-notify": cmd_test_notify,
                "start": cmd_start, "stop": cmd_stop, "logs-push": cmd_logs_push,

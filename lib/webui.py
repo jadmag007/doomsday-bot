@@ -119,6 +119,7 @@ def build_overview(cfg: dict) -> dict:
     from . import starter as starter_mod
     from . import tma as tma_mod
     from . import game_data
+    from . import timing
     now = datetime.datetime.now()
 
     def since(key):
@@ -128,10 +129,15 @@ def build_overview(cfg: dict) -> dict:
         except ValueError:
             return None
 
-    hours = float(cfg.get("schedules", {}).get("reboot_interval_hours", 12) or 12)
     minutes = int(cfg.get("schedules", {}).get("scan_interval_minutes", 60) or 60)
     last_scan = since("last_scan_ts")
-    next_scan = last_scan + datetime.timedelta(minutes=minutes) if last_scan else None
+    # следующий скан — с тем же стабильным джиттером, что и в cron (план = отображение)
+    if last_scan:
+        scan_interval = timing.scan_interval_sec(cfg, db.kv_get("last_scan_ts"))
+        next_scan = last_scan + datetime.timedelta(seconds=scan_interval)
+    else:
+        next_scan = None
+    hours = float(cfg.get("schedules", {}).get("reboot_interval_hours", 12) or 12)
     resources = []
     for r in db.resources_latest_ru():
         mx = r.get("maximum")
@@ -159,6 +165,17 @@ def build_overview(cfg: dict) -> dict:
         "last": [{"ts": e.get("ts"), "title": e.get("title"),
                    "body": e.get("body")} for e in last_ex],
     }
+    # безопасность + здоровье cron + ETA DDT-ресурсов (для статусбара)
+    security = {
+        "night_enabled": bool(((cfg.get("security") or {}).get("night_mode") or {}).get("enabled")),
+        "night_active": timing.night_active(cfg, now),
+        "night_from": ((cfg.get("security") or {}).get("night_mode") or {}).get("from"),
+        "night_to": ((cfg.get("security") or {}).get("night_mode") or {}).get("to"),
+        "jitter_enabled": timing.jitter_enabled(cfg),
+    }
+    last_cron = since("last_cron_ts")
+    cron_alive = last_cron is not None and (now - last_cron).total_seconds() <= 25 * 60
+    ddt_eta = db.kv_get("ddt_eta") or {}
     timers = {
         "last_reboot": _iso_min(db.kv_get("last_reboot_ts")),
         "last_scan": _iso_min(db.kv_get("last_scan_ts")),
@@ -166,6 +183,8 @@ def build_overview(cfg: dict) -> dict:
         "scan_in_sec": max(0, int((next_scan - now).total_seconds())) if next_scan else None,
         "last_summary": db.kv_get("last_summary_date"),
         "scan_interval_minutes": minutes,
+        "last_cron_ts": _iso_min(db.kv_get("last_cron_ts")),
+        "cron_alive": cron_alive,
         "farm_cycle": {
             "known": farm.get("known", False),
             "ends_at": farm.get("ends_at"),
@@ -174,6 +193,7 @@ def build_overview(cfg: dict) -> dict:
             "reboot_at": farm.get("reboot_at"),
             "reboot_in_sec": farm.get("reboot_in_sec"),
             "before_min": farm.get("before_min"),
+            "reboot_jitter_sec": farm.get("reboot_jitter_sec"),
             "total_sec": int(hours * 3600),
         },
     }
@@ -185,6 +205,8 @@ def build_overview(cfg: dict) -> dict:
         "resources": resources,
         "resource_filter": (cfg.get("notify", {}).get("resource_filter") or []),
         "exchange": exchange,
+        "security": security,
+        "ddt_eta": ddt_eta,
         "running": running or None,
         "events": db.events_list(limit=12),
         "last_check_ok": checks[0].get("severity") == "info" if checks else None,

@@ -635,9 +635,13 @@ def farm_deadline_info(cfg: dict = None) -> dict:
         "active": left_sec > 0,
     }
     if cfg is not None:
-        before = int((cfg.get("schedules") or {}).get("reboot_before_end_minutes", 10) or 0)
-        rb_sec = ends_ms / 1000 - before * 60
-        out["before_min"] = before
+        from . import timing
+        before_sec = timing.reboot_before_sec(cfg, ends_raw)
+        rb_sec = ends_ms / 1000 - before_sec
+        out["before_min"] = int(round(before_sec / 60))
         out["reboot_at"] = datetime.datetime.fromtimestamp(rb_sec).isoformat(timespec="seconds")
         out["reboot_in_sec"] = int(rb_sec - _time.time())
+        # джиттер окна (±сек, стабильный для цикла) — чтобы показать честный диапазон
+        jt = ((cfg.get("security") or {}).get("jitter")) or {}
+        out["reboot_jitter_sec"] = int(jt.get("reboot_seconds", 180)) if jt.get("enabled", True) else 0
     return out

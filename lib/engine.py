@@ -172,7 +172,16 @@ def parse_resources_doomsday(state: dict) -> list:
         else:
             st = ""
         name = game_data.ru_name(rid, rid)
-        rows.append(_mk_resource(name, count, cap, st, rid))
+        row = _mk_resource(name, count, cap, st, rid)
+        # данные производства (для расчёта времени до следующей единицы —
+        # ETA DDT-ресурсов в статусбаре): progress — СЕКУНДЫ текущего крафта
+        row["craft_info"] = {
+            "progress": _num(passive.get("progress")) or 0.0,
+            "craft": craft,
+            "craft_real": craft_real,
+            "workers": workers or 0,
+        }
+        rows.append(row)
     return rows
 
 
@@ -303,7 +312,8 @@ async def _auto_exchange(cfg: dict, resources: list, ctx: dict, timeout: int) ->
         db.event("exchange", f"Продано: {name}",
                  f"{name} ×{amount:g} → {reports[-1]['proceeds']} "
                  f"(остаток: {left:g}, режим: {'при заполнении' if rule.get('mode') == 'cap' else 'сразу'})")
-        _time.sleep(0.8)  # не дёргаем API игры чаще необходимого
+        from . import timing as timing_mod
+        _time.sleep(timing_mod.sell_pause_sec(cfg, f"{rid}:{amount:g}"))  # пауза без одинаковых значений
     if errors:
         db.event("exchange", "Автообмен: ошибка", "\n".join(errors)[:1000], severity="critical")
         notify_mod.notify_error(cfg, "Автообмен не удался", "\n".join(errors)[:300])
@@ -328,6 +338,74 @@ def _store_balances(state: dict, ctx: dict) -> None:
         db.kv_set("balance_coin", coin)
     if mcoin is not None:
         db.kv_set("balance_mcoin", mcoin)
+
+
+def compute_ddt_eta(resources: list) -> dict:
+    """Время до следующей единицы каждого DDT-продающегося ресурса.
+
+    Модель по коду игры (progress — СЕКУНДЫ текущего крафта, 0..produceTime):
+      1) реальная скорость craftPerMinuteReal уже учитывает нехватку входов
+         (урана) — ETA = оставшаяся доля единицы / скорость;
+      2) если реальная скорость 0 (добыча входа встала) — считаем по доходу
+         входного ресурса: сколько его не хватает до остатка стоимости единицы;
+      3) нет данных/воркеров — None (в панели «—»).
+    Возвращает {rid: {eta_sec, at, stock, cap, workers, note}} для kv.
+    """
+    from . import game_data
+    by_rid = {}
+    for r in resources or []:
+        rid = r.get("id") or game_data.rid_by_name(r.get("name"))
+        if rid:
+            by_rid[rid] = r
+    out = {}
+    now_iso = db.now_iso()
+    for rid, info in game_data.SELL_INFO.items():
+        if not info["is_ddt"]:
+            continue
+        row = by_rid.get(rid)
+        if not row:
+            continue
+        ci = row.get("craft_info") or {}
+        produce = game_data.produce_time(rid)
+        item = {"at": now_iso, "stock": row.get("current"), "cap": row.get("max"),
+                "workers": ci.get("workers"), "eta_sec": None, "note": ""}
+        if not produce or not ci:
+            item["note"] = "нет данных производства"
+            out[rid] = item
+            continue
+        if not ci.get("workers"):
+            item["note"] = "производство простаивает"
+            out[rid] = item
+            continue
+        progress = min(max(float(ci.get("progress") or 0), 0.0), float(produce))
+        remaining_share = 1.0 - progress / float(produce)
+        craft_real = ci.get("craft_real")
+        if craft_real:
+            # реальная скорость (с учётом входов) → ETA текущей единицы
+            item["eta_sec"] = round(remaining_share / float(craft_real) * 60.0)
+        else:
+            # стоп: не хватает входа — по его доходу (для урановых — уран)
+            costs = game_data.craft_cost(rid)
+            eta = None
+            for in_rid, cnt in costs:
+                in_row = by_rid.get(in_rid)
+                if not in_row:
+                    continue
+                need = float(cnt) * remaining_share
+                have = float(in_row.get("current") or 0)
+                in_ci = in_row.get("craft_info") or {}
+                in_rate = in_ci.get("craft_real") or 0  # единиц входа в минуту
+                if in_rate and in_rate > 0:
+                    cand = max(0.0, need - have) / float(in_rate) * 60.0
+                    eta = cand if eta is None else max(eta, cand)
+                elif have >= need:
+                    cand = 0.0
+                    eta = cand if eta is None else max(eta, cand)
+            item["eta_sec"] = round(eta) if eta is not None else None
+            if item["eta_sec"] is None:
+                item["note"] = "нет дохода входных ресурсов"
+        out[rid] = item
+    return out
 
 
 async def action_scan(cfg: dict) -> dict:
@@ -370,6 +448,8 @@ async def action_scan(cfg: dict) -> dict:
             resources = parse_resources_doomsday(state) if isinstance(state, dict) else []
             if resources:
                 _store_balances(state, outcome["ctx"])
+                # ETA следующих DDT-ресурсов (для статусбара панели)
+                db.kv_set("ddt_eta", compute_ddt_eta(resources))
                 # автообмен ПЕРЕД порогами: обменянный склад не должен
                 # порождать уведомление «почти полон»
                 ex_timeout = int(tma_cfg.get("timeout_seconds", 35))

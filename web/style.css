@@ -296,3 +296,25 @@ textarea.json-invalid { border-color: var(--danger); }
   .ex-rule-ctrl .select { flex: 1 1 auto; max-width: none; }
   .ex-rule-proc { grid-column: 1 / -1; }
 }
+
+/* ---------- статусбар (компактная полоса под шапкой) ---------- */
+.statusbar {
+  display: flex; gap: .4rem; align-items: center; flex-wrap: wrap;
+  padding: 0 1rem .45rem;
+  font-family: var(--mono); font-size: .72rem; line-height: 1;
+}
+.sb-chip {
+  display: inline-flex; align-items: center; gap: .3rem;
+  padding: .3rem .55rem;
+  background: var(--bg2); border: 1px solid var(--border);
+  clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+  color: var(--muted); white-space: nowrap;
+}
+.sb-chip .sb-ico { display: inline-block; color: var(--muted); }
+.sb-chip.stale { color: var(--danger); border-color: rgba(255, 95, 86, .5); }
+.sb-chip.stale .sb-ico { color: var(--danger); animation: sb-blink 1.2s steps(2) infinite; }
+@keyframes sb-blink { 50% { opacity: .25; } }
+.sb-ddt .sb-img { width: 14px; height: 14px; }
+.sb-ddt .sb-eta { color: var(--gold); }
+.sb-ddt .sb-count { color: var(--muted); opacity: .85; }
+.sb-night { color: #9aa7d8; border-color: rgba(154, 167, 216, .35); }
