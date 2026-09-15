@@ -90,15 +90,19 @@ def _ts(key):
 def _due(now, cfg: dict, name: str) -> bool:
     """Настало ли время действия: джиттерный интервал истёк и не слишком рано после ошибки."""
     sch = cfg.get("schedules", {})
+    forced = False
     if name == "reboot":
         interval = timing.fallback_reboot_interval_sec(cfg, _iso_raw("last_reboot_ts"))
         last_ok = _ts("last_reboot_ts")
     elif name == "scan":
         interval = timing.scan_interval_sec(cfg, _iso_raw("last_scan_ts"))
         last_ok = _ts("last_scan_ts")
+        # контрольный скан после ребута — раньше регулярного интервала
+        force_at = _ts("force_scan_at")
+        forced = force_at is not None and now >= force_at
     else:
         return True
-    if last_ok is not None and (now - last_ok).total_seconds() < interval:
+    if not forced and last_ok is not None and (now - last_ok).total_seconds() < interval:
         return False
     # троттлинг повторов при ошибках
     retry = int(sch.get("retry_failed_minutes", 20) or 20) * 60
@@ -933,6 +937,98 @@ def cmd_selftest(args) -> int:
                 eta3 = engine.compute_ddt_eta(res5)
                 check("простаивает — ETA нет",
                       lambda: ((eta3.get("uran_pills") or {}).get("eta_sec") is None, ""))
+
+                print("selftest: обновление панели после ребута (регрессия 15.09 19:15)")
+                # сценарий устройства: цикл истёк, кассета 90.0%, ребут прошёл,
+                # но скана не было — панель висела с «требуется ребут»
+                _fresh_ends = int((_time.time() + 12 * 3600) * 1000)
+                _mines = {
+                    "cassete": {"levelStore": 29, "store": {"count": 52180}, "usagePerMinute": 0,
+                                "passive": {"workerCount": 2, "craftPerMinute": 30,
+                                            "craftPerMinuteReal": 30, "progress": 0}},
+                }
+                _state_expired = {
+                    "passiveFarm": {"endsAt": int((_time.time() - 60) * 1000)},
+                    "gameStats": {"coin": 1000, "mCoin": 5, "mines": _mines},
+                }
+                _ctx_r = {"game_state": _state_expired, "session_hash": "abc",
+                          "init_data": "user=1", "base_url": "https://x"}
+
+                def _fake_run_steps(steps, ctx, timeout=25):
+                    c = dict(ctx)
+                    c["game_state"] = {"passiveFarm": {"endsAt": _fresh_ends},
+                                       "gameStats": {"coin": 1000, "mCoin": 5, "mines": _mines}}
+                    c["farm_ends_at"] = _fresh_ends
+                    c["balance_coin"] = 1000
+                    c["balance_mcoin"] = 5
+                    return {"ok": True, "results": [{"name": "initUser", "status": "ok",
+                                                     "detail": "HTTP 200"}], "ctx": c}
+
+                _ex_seen = []
+
+                async def _fake_exchange(cfg, resources, ctx, timeout):
+                    _ex_seen.append([(r.get("id"), r.get("state")) for r in resources])
+                    return [{"rid": "cassete", "name": "Кассета", "amount": 52180,
+                             "proceeds": "+313 МБ", "balance": 4194304,
+                             "balance_ru": "4 ГБ", "left": 0}]
+
+                _orig_rs, _orig_ex = engine.tma.run_steps, engine._auto_exchange
+                engine.tma.run_steps = _fake_run_steps
+                engine._auto_exchange = _fake_exchange
+                try:
+                    rep = engine.run_coro(engine._refresh_after_reboot(
+                        cfgmod.DEFAULTS, _ctx_r, 25, {"name": "initUser", "url": "x"},
+                        rebooted=True))
+                    check("после ребута: автообмен запускается сразу",
+                          lambda: (len(rep) == 1 and rep[0]["rid"] == "cassete", str(rep)))
+                    _st = {r.get("id"): r.get("state") for r in db.resources_latest_ru()}
+                    check("после ребута: статус «требуется ребут» снят",
+                          lambda: (_st.get("cassete") == "", str(_st)))
+                    check("после ребута: новый цикл сохранён",
+                          lambda: (db.kv_get("passive_farm_ends_at") == str(_fresh_ends),
+                                   str(db.kv_get("passive_farm_ends_at"))))
+                    _fs = db.kv_get("force_scan_at")
+                    check("контрольный скан назначен", lambda: (_fs is not None, str(_fs)))
+                    if _fs:
+                        _in_min = (_dt.datetime.fromisoformat(_fs)
+                                   - _dt.datetime.now()).total_seconds() / 60
+                        check("контрольный скан через 4–10 мин",
+                              lambda: (4 <= _in_min <= 10, f"{_in_min:.1f} мин"))
+                    # фолбэк: повторный initUser не удался — состояние до ребута
+                    engine.tma.run_steps = lambda steps, ctx, timeout=25: \
+                        {"ok": False, "results": [], "ctx": {}}
+                    _ex_seen.clear()
+                    engine.run_coro(engine._refresh_after_reboot(
+                        cfgmod.DEFAULTS, _ctx_r, 25, {"name": "initUser", "url": "x"},
+                        rebooted=True))
+                    _st2 = {r.get("id"): r.get("state") for r in db.resources_latest_ru()}
+                    check("фолбэк: статус снят и без повторного initUser",
+                          lambda: (_st2.get("cassete") == "" and len(_ex_seen) == 1, str(_st2)))
+                    # skip-путь (цикл уже свежий): состояние из initUser как есть
+                    _ctx_skip = {"game_state": {"passiveFarm": {"endsAt": _fresh_ends},
+                                                "gameStats": {"coin": 1, "mCoin": 2,
+                                                              "mines": _mines}}}
+                    engine.run_coro(engine._refresh_after_reboot(
+                        cfgmod.DEFAULTS, _ctx_skip, 25, {"name": "initUser", "url": "x"},
+                        rebooted=False))
+                    check("skip (цикл свежий): обмен по свежему состоянию",
+                          lambda: (len(_ex_seen) == 2, str(_ex_seen)))
+                finally:
+                    engine.tma.run_steps = _orig_rs
+                    engine._auto_exchange = _orig_ex
+                db.kv_set("last_scan_ts", _dt.datetime.now().isoformat(timespec="seconds"))
+                db.kv_set("force_scan_at", None)
+                check("без форса скан ждёт интервала",
+                      lambda: (_due(_dt.datetime.now(), cfgmod.DEFAULTS, "scan") is False, ""))
+                db.kv_set("force_scan_at",
+                          (_dt.datetime.now() - _dt.timedelta(seconds=1)).isoformat(timespec="seconds"))
+                check("просроченный форс — скан назначен",
+                      lambda: (_due(_dt.datetime.now(), cfgmod.DEFAULTS, "scan") is True, ""))
+                db.kv_set("force_scan_at",
+                          (_dt.datetime.now() + _dt.timedelta(minutes=5)).isoformat(timespec="seconds"))
+                check("форс в будущем — ждём", lambda: (_due(_dt.datetime.now(), cfgmod.DEFAULTS,
+                                                            "scan") is False, ""))
+                db.kv_set("force_scan_at", None)
             finally:
                 engine.notify_mod.notify = orig_notify
         finally:

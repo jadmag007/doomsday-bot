@@ -137,6 +137,10 @@ def build_overview(cfg: dict) -> dict:
         next_scan = last_scan + datetime.timedelta(seconds=scan_interval)
     else:
         next_scan = None
+    # контрольный скан после ребута может быть раньше регулярного
+    force_at = since("force_scan_at")
+    if force_at and (next_scan is None or force_at < next_scan):
+        next_scan = force_at
     hours = float(cfg.get("schedules", {}).get("reboot_interval_hours", 12) or 12)
     resources = []
     for r in db.resources_latest_ru():

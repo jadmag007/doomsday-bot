@@ -570,6 +570,20 @@ def cmd_start(args) -> int:
 
     # контрольный проход: догоняем пропущенное (действия решат сами, пора ли)
     if os.path.isfile(paths.BIN_DOOMSDAY):
+        # после (пере)запуска бота панель должна показать свежие данные:
+        # если последний скан старше 20 минут — контрольный проход сканирует
+        # сразу, не дожидаясь интервала (регрессия 15.09: несколько
+        # перезапусков подряд не обновляли «требуется ребут» на ресурсах)
+        try:
+            import datetime as _dt
+            _ls = db.kv_get("last_scan_ts")
+            _ls_dt = _dt.datetime.fromisoformat(_ls) if _ls else None
+            if _ls_dt is None or (_dt.datetime.now() - _ls_dt).total_seconds() > 20 * 60:
+                db.kv_set("force_scan_at",
+                          (_dt.datetime.now() + _dt.timedelta(seconds=5)
+                           ).isoformat(timespec="seconds"))
+        except (ValueError, OSError):
+            pass
         try:
             _spawn("cron", [paths.BIN_DOOMSDAY, "cron"], "cron.log")
             _say("контрольный проход cron запущен в фоне")

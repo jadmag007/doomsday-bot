@@ -501,6 +501,7 @@ async def action_scan(cfg: dict) -> dict:
                 "TMA-скан не настроен (tma.steps_scan пуст). Выполнялся только мониторинг чата бота."
             )
         db.kv_set("last_scan_ts", db.now_iso())
+        db.kv_set("force_scan_at", None)  # контрольный скан после ребута выполнен
         db.event("scan", "Скан выполнен",
                  json.dumps({"chat_alerts": len(alerts), "resources": len(result["resources"])},
                             ensure_ascii=False))
@@ -606,6 +607,68 @@ def reboot_fresh_cycle(ends_at_ms, now_sec: float, before_sec: int,
     return (ends_at_ms / 1000.0 - now_sec) > (before_sec + margin_sec)
 
 
+def _force_scan_soon() -> None:
+    """Назначить контрольный скан через несколько минут — не по интервалу.
+
+    После ребута производство возобновляется и склады растут заново: обычный
+    интервал скана (45 мин и больше с учётом Doze) слишком долог — панель и
+    автообмен должны увидеть свежие данные почти сразу. Смещение стабильно
+    по моменту ребута, ±2 минуты вокруг 7 минут.
+    """
+    import datetime as _dt
+    from . import timing as timing_mod
+    delay = max(60.0, 7 * 60 + timing_mod.jitter_offset(f"force-scan-{db.now_iso()}", 120))
+    at = _dt.datetime.now() + _dt.timedelta(seconds=delay)
+    db.kv_set("force_scan_at", at.isoformat(timespec="seconds"))
+
+
+async def _refresh_after_reboot(cfg: dict, ctx: dict, timeout: int,
+                                init_step: dict, rebooted: bool) -> list:
+    """Обновить ресурсы панели сразу после ребута, не дожидаясь скана.
+
+    Диагностика 15.09: ребут в 19:15 прошёл, но следующий скан по расписанию
+    был только через 45+ минут (и позже из-за Doze) — всё это время панель
+    показывала снимок с «требуется ребут» на каждом ресурсе, а кассета,
+    остановившаяся в 20 единицах от порога, так и не обменялась.
+
+    После успешного ребута повторяем initUser той же сессией: он возвращает
+    точный новый цикл и актуальные состояния производства. Если повтор не
+    удался — берём состояние из первого initUser и правим статус «требуется
+    ребут» вручную (производство уже идёт). При пропуске ребута («цикл уже
+    свежий») состояние из первого initUser и так актуально.
+
+    Затем: снимок ресурсов в панель, автообмен по правилам (за время простоя
+    склад мог дойти до порога) и контрольный скан через несколько минут.
+    Возвращает отчёт обмена (может быть пустым).
+    """
+    state = ctx.get("game_state") if isinstance(ctx.get("game_state"), dict) else None
+    ex_ctx = ctx
+    if rebooted and state is not None:
+        re_out = tma.run_steps([init_step], dict(ctx), timeout=timeout)
+        if re_out["ok"] and isinstance(re_out["ctx"].get("game_state"), dict):
+            state = re_out["ctx"]["game_state"]
+            ex_ctx = re_out["ctx"]
+            _store_balances(state, ex_ctx)
+            ends = ex_ctx.get("farm_ends_at")
+            if isinstance(ends, (int, float)):
+                db.kv_set("passive_farm_ends_at", str(int(ends)))
+    resources = parse_resources_doomsday(state) if isinstance(state, dict) else []
+    if not resources:
+        _force_scan_soon()
+        return []
+    if rebooted:
+        # данные могли быть взяты до ребута: производство уже возобновилось
+        for r in resources:
+            if r.get("state") == "требуется ребут":
+                r["state"] = ""
+    db.kv_set("ddt_eta", compute_ddt_eta(resources))
+    ex_report = await _auto_exchange(cfg, resources, ex_ctx, timeout)
+    # снимок ПОСЛЕ обмена: панель видит постпродажные остатки
+    db.resource_snapshot(resources)
+    _force_scan_soon()
+    return ex_report
+
+
 async def action_reboot(cfg: dict) -> dict:
     """Ребут производства: TMA API rebootProduction (встроенный пресет Doomsday).
 
@@ -630,19 +693,18 @@ async def action_reboot(cfg: dict) -> dict:
         if tma_cfg.get("enabled", True) and steps:
             custom = bool((cfg.get("tma") or {}).get("steps_reboot"))
             before_sec = int(cfg.get("schedules", {}).get("reboot_before_end_minutes", 10) or 10) * 60
+            init_step = next((s for s in steps if s.get("name") == "initUser"), None)
+            reboot_step = next((s for s in steps if s.get("name") == "rebootProduction"), None)
+            preset_path = (not custom) and init_step is not None and reboot_step is not None
 
             async def _tma_pass() -> dict:
                 webview_url = await tgapi.resolve_webview_url(client, bot, cfg)
                 ctx = tma.build_context(cfg, webview_url)
                 timeout = int(tma_cfg.get("timeout_seconds", 35))
-                if custom:
+                if not preset_path:
                     # кастомные шаги — как раньше, одним конвейером
                     return tma.run_steps(steps, ctx, timeout=timeout)
                 # пресет: initUser (регистрация сессии) → rebootProduction
-                init_step = next((s for s in steps if s.get("name") == "initUser"), None)
-                reboot_step = next((s for s in steps if s.get("name") == "rebootProduction"), None)
-                if init_step is None or reboot_step is None:
-                    return tma.run_steps(steps, ctx, timeout=timeout)
                 outcome = tma.run_steps([init_step], ctx, timeout=timeout)
                 if not outcome["ok"]:
                     return outcome
@@ -686,6 +748,18 @@ async def action_reboot(cfg: dict) -> dict:
                 db.kv_set("notified_reboot_needed", [])
                 result["farm_ends_at"] = ends_at
                 result["cycle_until"] = _fmt_ms_deadline(ends_at)
+            if outcome["ok"] and preset_path:
+                # панель сразу видит новый цикл: ресурсы/балансы/автообмен
+                # без ожидания ближайшего скана по интервалу
+                skipped = any(s.get("status") == "skip" for s in outcome["results"])
+                try:
+                    ex_report = await _refresh_after_reboot(
+                        cfg, outcome["ctx"], int(tma_cfg.get("timeout_seconds", 35)),
+                        init_step, rebooted=not skipped)
+                    if ex_report:
+                        result["exchange"] = ex_report
+                except Exception as e:  # обновление не должно ронять ребут
+                    result["notes"].append(f"обновление панели после ребута: {e}")
         else:
             # TMA не настроен: «вход в игру» через webview + уведомление с кнопкой
             try:
