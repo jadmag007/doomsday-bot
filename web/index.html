@@ -44,6 +44,12 @@
 <section id="tab-dash" class="tab-page active">
   <div class="timer-grid">
     <div class="card timer-card">
+      <div class="card-label">Цикл производства (игра)</div>
+      <div class="timer" id="t-farm">--:--:--</div>
+      <div class="card-sub" id="t-farm-sub">нет данных</div>
+      <div class="progress"><div class="progress-bar" id="t-farm-bar" style="width:0%"></div></div>
+    </div>
+    <div class="card timer-card">
       <div class="card-label">Следующий ребут производства</div>
       <div class="timer" id="t-reboot">--:--:--</div>
       <div class="card-sub" id="t-reboot-sub">нет данных</div>
@@ -71,9 +77,9 @@
     <div class="card-head"><div class="card-label">Быстрые действия</div></div>
     <div class="actions-row">
       <button class="btn primary" data-action="reboot">⟳ Ребут производства</button>
+      <button class="btn" data-action="scan">🔍 Скан сейчас</button>
       <button class="btn" data-action="test-notify">🔔 Тест уведомления</button>
       <button class="btn" data-action="check">✓ Диагностика</button>
-      <button class="btn" data-action="update">⬇ Проверить обновления</button>
     </div>
     <div id="running-banner" class="running hidden"></div>
   </div>
@@ -95,8 +101,6 @@
         <input id="f-scan-min" type="number" min="4" max="1440" step="1"></label>
       <label>Время daily-сводки <span class="hint">(ЧЧ:ММ, локальное)</span>
         <input id="f-summary-time" type="time"></label>
-      <label>Проверка обновлений, минут
-        <input id="f-update-min" type="number" min="15" max="1440" step="5"></label>
       <label>Повтор при ошибке, минут
         <input id="f-retry-min" type="number" min="5" max="720" step="5"></label>
     </div>
@@ -225,22 +229,7 @@
     <button id="add-res-pattern" class="btn small">+ Паттерн</button>
   </div>
 
-  <div class="card">
-    <div class="card-head">
-      <div class="card-label">Обновления из Загрузок</div>
-      <button class="btn" data-action="update">Проверить сейчас</button>
-    </div>
-    <div class="form-grid">
-      <label>Каталог Загрузок <span class="hint">(пусто = автоопределение)</span>
-        <input id="f-dl-dir" type="text" placeholder="/storage/emulated/0/Download"></label>
-      <label>Маска архива
-        <input id="f-dl-pattern" type="text" value="doomsday-bot-v*.zip"></label>
-      <label class="check"><input id="f-upd-enabled" type="checkbox"> Автообновление включено</label>
-    </div>
-    <div id="updates-info"></div>
-  </div>
-
-  <button id="save-api" class="btn primary big">Сохранить API и обновления</button>
+  <button id="save-api" class="btn primary big">Сохранить настройки API</button>
   <span id="api-msg" class="save-msg"></span>
 </section>
 
@@ -255,7 +244,7 @@
         <option value="scan">скан</option>
         <option value="summary">сводка</option>
         <option value="chat">чат бота</option>
-        <option value="update">обновления</option>
+        <option value="start">запуски стартера</option>
         <option value="notify:resource_full">склад полон</option>
         <option value="notify:resource_warn">почти полон</option>
         <option value="notify:errors">ошибки</option>

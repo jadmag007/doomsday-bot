@@ -21,7 +21,6 @@ DEFAULTS = {
         "reboot_interval_hours": 12,
         "scan_interval_minutes": 60,
         "summary_time": "20:00",
-        "update_check_minutes": 60,
         "retry_failed_minutes": 20,
     },
     "tma": {
@@ -57,18 +56,10 @@ DEFAULTS = {
             "scan_report": False,
             "errors": True,
             "daily_summary": True,
-            "update_applied": True,
             "chat_alerts": True,
         },
         "priority_high": ["resource_full", "errors"],
         "open_game_button": True,
-    },
-    "updater": {
-        "enabled": True,
-        "download_dir": "",  # пусто = автоопределение (~/storage/downloads → /storage/emulated/0/Download)
-        "pattern": "doomsday-bot-v*.zip",
-        "keep_applied": 5,
-        "restart_web_on_update": True,
     },
     "web": {
         "host": "127.0.0.1",
@@ -89,6 +80,31 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
+# Ключи прошлых версий (zip-обновлятор удалён в v2.0.0) — вычищаем при загрузке,
+# чтобы config.json не разбухал и веб-панель не показывала мёртвые настройки.
+LEGACY_KEYS = {
+    "updater": None,                      # секция целиком
+    ("schedules", "update_check_minutes"): None,
+    ("notify", "events", "update_applied"): None,
+}
+
+
+def _strip_legacy(cfg: dict) -> dict:
+    for key, _ in LEGACY_KEYS.items():
+        if isinstance(key, tuple):
+            d = cfg
+            for part in key[:-1]:
+                if not isinstance(d.get(part), dict):
+                    d = None
+                    break
+                d = d[part]
+            if isinstance(d, dict):
+                d.pop(key[-1], None)
+        else:
+            cfg.pop(key, None)
+    return cfg
+
+
 def load() -> dict:
     """Загрузить конфиг с подмешиванием дефолтов (миграция на новую версию без потери данных)."""
     user = {}
@@ -106,7 +122,7 @@ def load() -> dict:
         except OSError:
             pass
         user = {}
-    return _deep_merge(DEFAULTS, user)
+    return _strip_legacy(_deep_merge(DEFAULTS, user))
 
 
 def save(cfg: dict) -> dict:

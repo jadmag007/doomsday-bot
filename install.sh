@@ -1,8 +1,13 @@
 #!/data/data/com.termux/files/usr/bin/sh
 # ============================================================
-#  Doomsday Tyranny Bot — автоустановка для Termux (Android)
-#  Запуск (после распаковки архива в ~/doomsday-src):
+#  Doomsday Tyranny Bot — установка для Termux (Android)
+#
+#  Единственный способ установки и обновления — git:
+#    git clone https://github.com/<user>/doomsday-bot.git ~/doomsday-src
 #    bash ~/doomsday-src/install.sh
+#
+#  Обновление на телефоне — той же командой install.sh или
+#  стартёром:  doomsday start  (сам делает git pull + reinstall)
 # ============================================================
 set -u
 
@@ -31,39 +36,24 @@ echo "║   ☢  Doomsday Tyranny Bot — установка        ║"
 echo "║   ребут 12ч · скан ресурсов · веб-панель     ║"
 echo "╚══════════════════════════════════════════════╝"
 printf "${OFF}"
-echo "Источник:  $SRC_DIR"
-echo "Установка: $APP_DIR"
+echo "Исходники (git): $SRC_DIR"
+echo "Установка:       $APP_DIR"
 echo ""
 
 # ---------- 1. пакеты ----------
-say "Пакеты Termux (python, cronie, termux-api, termux-services)…"
-pkg install -y python cronie termux-api termux-services termux-tools unzip >/dev/null 2>&1 \
-    || pkg install -y python cronie termux-services unzip >/dev/null 2>&1 \
+say "Пакеты Termux (python, git, cronie, termux-api, termux-services)…"
+pkg install -y python git cronie termux-api termux-services termux-tools >/dev/null 2>&1 \
+    || pkg install -y python git cronie termux-services >/dev/null 2>&1 \
     || warn "pkg install завершился с ошибкой — проверьте сеть (pkg update)"
 command -v python >/dev/null 2>&1 || die "python не установлен. Выполните: pkg install python"
 command -v crontab >/dev/null 2>&1 || warn "crontab не найден — планировщик не будет установлен автоматически"
 ok "пакеты готовы"
 
-# ---------- 2. доступ к Загрузкам ----------
-say "Доступ к Загрузкам (для автообновления из архива)…"
-DL_AUTO="/storage/emulated/0/Download"
-DL_HOME="$HOME/storage/downloads"
-if [ ! -d "$DL_HOME" ] && [ ! -d "$DL_AUTO" ]; then
-    warn "Нет доступа к общей памяти. Сейчас откроется запрос разрешений — нажмите «Разрешить»"
-    termux-setup-storage 2>/dev/null
-    sleep 3
-fi
-if [ -d "$DL_HOME" ] || [ -d "$DL_AUTO" ]; then
-    ok "Загрузки доступны"
-else
-    warn "Загрузки недоступны — автообновление из архива будет ждать termux-setup-storage"
-fi
-
-# ---------- 3. копирование кода ----------
+# ---------- 2. копирование кода ----------
 say "Копирую код в $APP_DIR…"
 REINSTALL=0
-# перенос настроек из репозитория/исходников (клон на новом устройстве):
-# если в каталоге с исходниками есть config.json, а в установке ещё нет — берём его
+# перенос настроек из репозитория (клон на новом устройстве):
+# если в исходниках есть config.json, а в установке ещё нет — берём его
 mkdir -p "$APP_DIR"
 if [ ! -f "$APP_DIR/config.json" ] && [ -f "$SRC_DIR/config.json" ]; then
     cp -f "$SRC_DIR/config.json" "$APP_DIR/config.json"
@@ -73,7 +63,7 @@ fi
 if [ "$SRC_DIR" = "$APP_DIR" ]; then
     warn "Исходники и установка — один и тот же каталог (git-клон напрямую): копирование пропущено"
 else
-    for entry in lib web bin boot service VERSION requirements.txt README.md install.sh update.sh uninstall.sh start.sh; do
+    for entry in lib web bin boot service VERSION requirements.txt README.md INSTALL.md install.sh uninstall.sh start.sh; do
         [ -e "$SRC_DIR/$entry" ] || continue
         case "$entry" in
             lib|web|bin|boot|service)
@@ -83,13 +73,18 @@ else
         esac
     done
 fi
-chmod +x "$APP_DIR/bin/doomsday" "$APP_DIR/update.sh" "$APP_DIR/uninstall.sh" "$APP_DIR/start.sh" \
+chmod +x "$APP_DIR/bin/doomsday" "$APP_DIR/uninstall.sh" "$APP_DIR/start.sh" \
     "$APP_DIR/service/run" "$APP_DIR/boot/doomsday-boot.sh" 2>/dev/null
-mkdir -p "$APP_DIR/logs" "$APP_DIR/session" "$APP_DIR/reports" "$APP_DIR/.updates"
+mkdir -p "$APP_DIR/logs" "$APP_DIR/session" "$APP_DIR/reports" "$APP_DIR/run"
 chmod 700 "$APP_DIR/session" 2>/dev/null
-[ "$REINSTALL" = "1" ] && ok "обновление поверх существующей установки (config/state сохранены)" || ok "скопировано"
 
-# ---------- 4. venv + зависимости ----------
+# чистка файлов прошлых версий (zip-обновлятор удалён в v2.0.0)
+rm -f  "$APP_DIR/update.sh" "$APP_DIR/lib/updater.py" 2>/dev/null
+rm -rf "$APP_DIR/.updates" "$APP_DIR/.update-staging" "$APP_DIR/.backup" 2>/dev/null
+[ -e "$SRC_DIR/install.sh" ] && [ "$REINSTALL" = "1" ] \
+    && ok "обновление поверх существующей установки (config/state сохранены)" || ok "скопировано"
+
+# ---------- 3. venv + зависимости ----------
 say "Python-окружение и Telethon (первый раз — пару минут)…"
 if [ ! -x "$APP_DIR/venv/bin/python" ]; then
     python -m venv "$APP_DIR/venv" >/dev/null 2>&1 || die "не удалось создать venv"
@@ -98,13 +93,13 @@ fi
     || die "pip install telethon провалился (проверьте интернет)"
 ok "зависимости установлены"
 
-# ---------- 5. первичная настройка ----------
+# ---------- 4. первичная настройка ----------
 if [ "$REINSTALL" = "0" ] || [ "${1:-}" = "--setup" ]; then
     say "Мастер настройки (api_id/api_hash, интервалы)…"
     "$APP_DIR/bin/doomsday" setup || warn "настройка прервана — позже: doomsday setup"
 fi
 
-# ---------- 6. Termux:Boot ----------
+# ---------- 5. Termux:Boot ----------
 if [ -d "$HOME/.termux" ] || command -v termux-info >/dev/null 2>&1; then
     say "Автозапуск после перезагрузки (Termux:Boot)…"
     mkdir -p "$BOOT_DIR"
@@ -114,7 +109,7 @@ if [ -d "$HOME/.termux" ] || command -v termux-info >/dev/null 2>&1; then
     command -v termux-wake-lock >/dev/null 2>&1 || warn "Установите приложение Termux:Boot (F-Droid/GitHub), иначе автозапуск не сработает"
 fi
 
-# ---------- 7. сервис веб-панели ----------
+# ---------- 6. сервис веб-панели ----------
 say "Сервис веб-панели (termux-services)…"
 if [ -d "$PREFIX/var/service" ] || pkg list-installed 2>/dev/null | grep -q termux-services; then
     mkdir -p "$SVC_DIR"
@@ -127,10 +122,10 @@ if [ -d "$PREFIX/var/service" ] || pkg list-installed 2>/dev/null | grep -q term
         || warn "не удалось поднять сервис сейчас — перезапустите Termux"
     ok "сервис doomsday-web запущен"
 else
-    warn "termux-services не установлен — веб-панель запускайте вручную: doomsday web"
+    warn "termux-services не установлен — панель запустит стартёр: doomsday start"
 fi
 
-# ---------- 8. cronie ----------
+# ---------- 7. cronie ----------
 say "Планировщик cronie…"
 if command -v crontab >/dev/null 2>&1; then
     RUNLINE="$CRON_MARK */10 * * * * $APP_DIR/bin/doomsday cron >> $APP_DIR/logs/cron.log 2>&1"
@@ -144,14 +139,14 @@ else
     warn "crontab недоступен — установите cronie: pkg install cronie termux-services"
 fi
 
-# ---------- 9. глобальная команда doomsday ----------
+# ---------- 8. глобальная команда doomsday ----------
 say "Глобальная команда doomsday…"
 if [ -d "$PREFIX/bin" ]; then
     ln -sf "$APP_DIR/bin/doomsday" "$PREFIX/bin/doomsday"
     ok "doomsday доступна из любого места (симлинк в \$PREFIX/bin)"
 fi
 
-# ---------- 10. Termux:API ----------
+# ---------- 9. Termux:API ----------
 say "Проверка push-уведомлений…"
 if command -v termux-notification >/dev/null 2>&1; then
     ok "termux-notification доступен"
@@ -160,26 +155,23 @@ else
     warn "termux-api не установлен: pkg install termux-api + приложение Termux:API"
 fi
 
-# ---------- 11. контроль ----------
+# ---------- 10. контроль ----------
 "$APP_DIR/bin/doomsday" selftest || warn "selftest нашёл проблемы"
 
+PANEL_URL="http://127.0.0.1:8080"
 echo ""
 printf "${GREEN}══════════════════════════════════════════════${OFF}\n"
 echo " Установка завершена. Дальнейшие шаги:"
 echo ""
 echo "   1) doomsday login        # вход в Telegram (код + 2FA)"
-echo "   2) doomsday check        # диагностика всех компонентов"
-echo "   3) doomsday discover     # найти API игры (отчёт в reports/)"
-echo "   4) браузер → http://127.0.0.1:8080"
+echo "   2) doomsday start        # запуск: сервисы + cron + панель"
+echo "   3) doomsday panel        # открыть веб-панель в браузере"
 echo ""
-echo " Веб-панель:  $([ -d "$SVC_DIR" ] && echo "сервис doomsday-web (уже запущен)" || echo "doomsday web")"
-echo " Команды:     doomsday status | scan | reboot | log | update"
-echo " Стартер:     sh ~/doomsday-bot/start.sh   # git-обновление + запуск всего"
+echo " Веб-панель:  $PANEL_URL  (после doomsday start)"
+echo " Статус/таймеры в терминале:  doomsday status"
+echo " Подробная инструкция:  INSTALL.md в репозитории"
 echo ""
 echo " ⚠ Обязательно в Android: Настройки → Приложения → Termux →"
 echo "   Батарея → «Без ограничений» (иначе Android усыпит cron ночью)."
 echo ""
-[ "$REINSTALL" = "0" ] && [ -d "$SRC_DIR" ] && [ "${SRC_DIR#$HOME}" != "$SRC_DIR" ] && {
-    say "Исходники в $SRC_DIR больше не нужны — удалите: rm -rf $SRC_DIR"
-}
 exit 0

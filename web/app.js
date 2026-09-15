@@ -119,6 +119,23 @@ function renderOverview(o) {
   $("t-scan-sub").textContent = T.last_scan ? `последний: ${fmtTs(T.last_scan)} · каждые ${T.scan_interval_minutes}м` : "первый скан при следующем проходе";
   $("t-reboot-bar").style.width = pctOf(T.reboot_in_sec, T.reboot_interval_hours * 3600);
   $("t-scan-bar").style.width = pctOf(T.scan_in_sec, T.scan_interval_minutes * 60);
+  // цикл производства (из API игры)
+  const F = T.farm_cycle || {}, fEl = $("t-farm");
+  fEl.style.color = "";
+  if (!F.known) {
+    fEl.textContent = "--:--:--";
+    $("t-farm-sub").textContent = "нет данных (появится после скана/ребута)";
+    $("t-farm-bar").style.width = "0%";
+  } else if (F.active) {
+    fEl.textContent = fmtDur(F.left_sec);
+    $("t-farm-sub").textContent = `конец цикла: ${fmtTs(F.ends_at)}`;
+    $("t-farm-bar").style.width = pctOf(F.left_sec, T.reboot_interval_hours * 3600);
+  } else {
+    fEl.textContent = "истёк";
+    fEl.style.color = "var(--danger)";
+    $("t-farm-sub").textContent = "требуется ребут — бот сделает его в ближайший проход";
+    $("t-farm-bar").style.width = "100%";
+  }
 
   // ресурсы
   const box = $("resources");
@@ -167,6 +184,12 @@ setInterval(() => {
   const T = OV.timers;
   if (T.reboot_in_sec != null) $("t-reboot").textContent = fmtDur(T.reboot_in_sec - 1);
   if (T.scan_in_sec != null) $("t-scan").textContent = fmtDur(T.scan_in_sec - 1);
+  const F = T.farm_cycle || {};
+  if (F.left_sec != null) {
+    const el = $("t-farm");
+    if (F.active) el.textContent = fmtDur(F.left_sec - 1);
+    else { el.textContent = "истёк"; el.style.color = "var(--danger)"; }
+  }
 }, 1000);
 
 /* каждые 30 сек — обновление обзора; каждую секунду — локальные тикеры */
@@ -195,11 +218,17 @@ document.addEventListener("click", async (e) => {
 function renderTimersState(T, o) {
   const el = $("timers-state");
   if (!el) return;
+  const F = T.farm_cycle || {};
+  let farmLine;
+  if (!F.known) farmLine = `<b>Цикл производства:</b> нет данных (после скана/ребута появится)`;
+  else if (F.active) farmLine = `<b>Цикл производства:</b> активен, до ${fmtTs(F.ends_at)} (осталось ${fmtDur(F.left_sec)})`;
+  else farmLine = `<b>Цикл производства:</b> <span style="color:var(--danger)">ИСТЁК — нужен ребут</span>`;
   el.innerHTML = `
+    <div>${farmLine}</div>
     <div><b>Последний ребут:</b> ${fmtTs(T.last_reboot)} → следующий ${fmtTs(T.next_reboot)}</div>
     <div><b>Последний скан:</b> ${fmtTs(T.last_scan)} → следующий ${fmtTs(T.next_scan)}</div>
-    <div><b>Сводка дня:</b> ${T.last_summary ? T.last_summary : "ещё не было"} (в ${T.summary_time || "20:00"})</div>
-    <div><b>Проверка обновлений:</b> ${fmtTs(T.last_update_check)}</div>`;
+    <div><b>Сводка дня:</b> ${T.last_summary ? T.last_summary : "ещё не было"}</div>
+    <div><b>API игры:</b> ${o.tma_preset ? "встроенный пресет (Firebase)" : "кастомные шаги"} · ${esc(o.tma_base_url || "?")}</div>`;
 }
 
 /* ================= загрузка журнала ================= */
@@ -261,10 +290,10 @@ const NOTIFY_EVENTS = [
   ["resource_full", "Склад переполнен"],
   ["resource_warn", "Ресурс близок к максимуму"],
   ["reboot_report", "Отчёт о ребуте"],
+  ["reboot_needed", "Цикл истёк — нужен ребут"],
   ["chat_alerts", "Уведомления бота в чате"],
   ["errors", "Ошибки"],
   ["daily_summary", "Сводка дня"],
-  ["update_applied", "Применены обновления"],
   ["scan_report", "Отчёт каждого скана"],
 ];
 
@@ -278,12 +307,11 @@ async function loadConfigIntoForms() {
 
 function fillForms(c) {
   const tg = c.telegram || {}, sc = c.schedules || {}, nf = c.notify || {},
-        wb = c.web || {}, ch = c.chat || {}, tm = c.tma || {}, up = c.updater || {};
+        wb = c.web || {}, ch = c.chat || {}, tm = c.tma || {};
   // таймеры
   $("f-reboot-hours").value = sc.reboot_interval_hours ?? 12;
   $("f-scan-min").value = sc.scan_interval_minutes ?? 60;
   $("f-summary-time").value = sc.summary_time || "20:00";
-  $("f-update-min").value = sc.update_check_minutes ?? 60;
   $("f-retry-min").value = sc.retry_failed_minutes ?? 20;
   // telegram
   $("f-api-id").value = tg.api_id || "";
@@ -321,10 +349,6 @@ function fillForms(c) {
   $("f-f-cur").value = f.current || "amount";
   $("f-f-max").value = f.max || "capacity";
   renderPatternRows($("res-patterns"), (rs.text_patterns || []), ["regex", "name"], ["enabled"]);
-  // обновления
-  $("f-dl-dir").value = up.download_dir || "";
-  $("f-dl-pattern").value = up.pattern || "doomsday-bot-v*.zip";
-  $("f-upd-enabled").checked = !!up.enabled;
 }
 
 /* ---- редактор паттернов ---- */
@@ -471,7 +495,6 @@ $("save-timers").addEventListener("click", async () => {
       reboot_interval_hours: num($("f-reboot-hours").value, 12, 1, 168),
       scan_interval_minutes: num($("f-scan-min").value, 60, 4, 1440),
       summary_time: $("f-summary-time").value || "20:00",
-      update_check_minutes: num($("f-update-min").value, 60, 15, 1440),
       retry_failed_minutes: num($("f-retry-min").value, 20, 5, 720),
     };
     await api("/api/config", { method: "PUT", body: c });
@@ -537,13 +560,6 @@ $("save-api").addEventListener("click", async () => {
         text_patterns: collectRows($("res-patterns"), ["regex", "name"], ["enabled"]),
       },
     };
-    c.updater = {
-      enabled: $("f-upd-enabled").checked,
-      download_dir: $("f-dl-dir").value.trim(),
-      pattern: $("f-dl-pattern").value.trim() || "doomsday-bot-v*.zip",
-      keep_applied: (c.updater || {}).keep_applied ?? 5,
-      restart_web_on_update: (c.updater || {}).restart_web_on_update ?? true,
-    };
     await api("/api/config", { method: "PUT", body: c });
     setMsg("api-msg", "Сохранено ✔"); loadConfigIntoForms(); refreshOverview();
   } catch (e) { setMsg("api-msg", e.message, true); }
@@ -562,7 +578,6 @@ async function loadDiscovery() {
   try {
     const d = await api("/api/discovery");
     renderDiscovery(d);
-    if (OV) renderUpdatesInfo(OV);
   } catch (e) { /* silent */ }
 }
 function renderDiscovery(d) {
@@ -582,15 +597,6 @@ function renderDiscovery(d) {
     ${ws.length ? `<div class="card-sub">WebSocket:</div><ul class="disc-list">${ws.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
     ${abs.length ? `<div class="card-sub">Абсолютные URL:</div><ul class="disc-list">${abs.slice(0, 30).map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
     ${(d.notes || []).length ? `<div class="note">${d.notes.map(esc).join("<br>")}</div>` : ""}
-    <div class="note">Скопируйте эти данные (или файл reports/discovery-*.json из Termux) в запрос к ассистенту — он подготовит точные шаги ребута/скана для v1.1, а автообновление применит их.</div>`;
-}
-function renderUpdatesInfo(o) {
-  const el = $("updates-info");
-  if (!el) return;
-  const a = o.updates.applied || [];
-  el.innerHTML = a.length
-    ? `<div class="kv-list"><div><b>Текущая версия:</b> v${esc(o.version)}</div>` +
-      a.slice().reverse().map(x => `<div><b>Применён архив:</b> ${esc(x.name)} → v${esc(x.version)} (${fmtTs(x.ts)})</div>`).join("") + "</div>"
-    : `<div class="muted">Текущая версия: v${esc(o.version)}; обновлений из Загрузок пока не применялось.</div>`;
+    <div class="note">Обновите страницу панели или выполните doomsday discover в Termux, чтобы заново проверить API игры.</div>`;
 }
 

@@ -19,10 +19,12 @@ def game_url(cfg: dict) -> str:
 
 
 def notify(cfg: dict, kind: str, title: str, body: str = "", high: bool = False,
-           open_game: bool = False) -> bool:
+           open_game: bool = False, button=None, nid: str = "") -> bool:
     """Отправить push-уведомление и записать событие в журнал.
 
     Возвращает True, если push реально доставлен в termux-notification.
+    button — кортеж (подпись, url): своя кнопка действия (например, «Открыть панель»).
+    nid — фиксированный id уведомления: новые с тем же id заменяют старые, а не копятся.
     """
     sev = "critical" if high else "info"
     db.event("notify:" + kind, title, body, severity=sev)
@@ -40,11 +42,16 @@ def notify(cfg: dict, kind: str, title: str, body: str = "", high: bool = False,
         return False
     args = [bin_path, "--title", f"Doomsday Tyranny: {title}", "--content", body or title]
     try:
+        if nid:
+            args += ["--id", nid]
         if force_high:
             args += ["--priority", "high", "--vibrate", "500,200,500", "--sound"]
         else:
             args += ["--priority", "default"]
-        if open_game and (cfg.get("notify", {}).get("open_game_button", True)):
+        if button:
+            label, url = button
+            args += ["--button1", label, "--button1-action", f"termux-open-url '{url}'"]
+        elif open_game and (cfg.get("notify", {}).get("open_game_button", True)):
             args += [
                 "--button1", "Открыть игру",
                 "--button1-action", f"termux-open-url '{game_url(cfg)}'",

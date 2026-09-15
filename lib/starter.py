@@ -13,9 +13,13 @@ import datetime
 import os
 import shutil
 import subprocess
+import time
+import urllib.error
+import urllib.request
 
 from . import config as cfgmod
 from . import db
+from . import notify as notify_mod
 from . import paths
 
 SRC_DIR = os.environ.get("DOOMSDAY_SRC_DIR") or os.path.expanduser("~/doomsday-src")
@@ -252,9 +256,72 @@ def services_down() -> None:
 
 # ---------------- команды CLI ----------------
 
-def _panel_url(cfg: dict) -> str:
+def panel_url(cfg: dict) -> str:
     web = cfg.get("web", {})
     return f"http://{web.get('host', '127.0.0.1')}:{web.get('port', 8080)}"
+
+
+def _panel_alive(cfg: dict, timeout: float = 2.0) -> bool:
+    """Отвечает ли веб-панель (даже 401 считается «жива»)."""
+    try:
+        urllib.request.urlopen(panel_url(cfg) + "/api/overview", timeout=timeout)
+        return True
+    except urllib.error.HTTPError:
+        return True
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return False
+
+
+def _ensure_panel(cfg: dict) -> bool:
+    """Запустить панель, если не отвечает. True — панель отвечает."""
+    if _panel_alive(cfg):
+        return True
+    _say("веб-панель не отвечает — запускаю…")
+    if _sv:
+        try:
+            subprocess.run(["sv", "up", "doomsday-web"], capture_output=True, timeout=30)
+            if _panel_alive(cfg, 4.0):
+                return True
+            subprocess.run(["sv", "restart", "doomsday-web"], capture_output=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if not _web_running() and os.path.isfile(paths.BIN_DOOMSDAY):
+        try:
+            _spawn("web", [paths.BIN_DOOMSDAY, "web"], "web.log")
+        except OSError as e:
+            _warn(f"не удалось запустить панель: {e}")
+            return False
+    for _ in range(24):  # ждём до 12 секунд
+        if _panel_alive(cfg):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def cmd_panel(args) -> int:
+    """Открыть веб-панель в браузере телефона (при необходимости — сначала запустить)."""
+    cfg = cfgmod.load()
+    url = panel_url(cfg)
+    ok = _ensure_panel(cfg)
+    if not ok:
+        print(f"✘ Панель не поднялась на {url}")
+        print("  Посмотрите ошибки: doomsday log -n 40")
+        print("  Или запустите её вручную в этом окне: doomsday web")
+        return 1
+    _ok(f"Веб-панель: {url}")
+    opener = shutil.which("termux-open-url")
+    if opener:
+        try:
+            subprocess.run([opener, url], capture_output=True, timeout=15)
+            _say("открываю браузер…")
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        _say("откройте адрес в любом браузере телефона (Chrome: вставьте в адресную строку)")
+    pin = str(cfg.get("web", {}).get("pin") or "")
+    if pin:
+        _say("панель защищена PIN (задаётся в настройках)")
+    return 0
 
 
 def cmd_start(args) -> int:
@@ -276,12 +343,18 @@ def cmd_start(args) -> int:
             _warn(f"контрольный проход не запущен: {e}")
 
     print()
-    _ok(f"doomsday-bot работает. Веб-панель: {_panel_url(cfg)}")
+    _ok(f"doomsday-bot работает. Веб-панель: {panel_url(cfg)}")
+    _say("открыть панель: doomsday panel  (или браузер → указанный адрес)")
     _say("логи: ~/doomsday-bot/logs (не синхронизируются)")
     _say("передать логи разработчику: doomsday logs-push")
     db.event("start", "Стартёр выполнен",
              f"код {'обновлён' if code_updated else 'без изменений'}; "
-             f"панель {_panel_url(cfg)}")
+             f"панель {panel_url(cfg)}")
+    # живая кнопка входа в панель: заменяет сама себя (id), не копится в шелле уведомлений
+    notify_mod.notify(
+        cfg, "panel_hint", "Бот запущен",
+        f"Веб-панель: {panel_url(cfg)}\nТаймеры, ресурсы и настройки — по кнопке ниже.",
+        open_game=False, button=("Открыть панель", panel_url(cfg)), nid="doomsday-panel")
     return 0
 
 

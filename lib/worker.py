@@ -3,7 +3,8 @@
 
 Запускается через bin/doomsday. Поддерживает:
   cron                  — плановый проход (вызывается cronie каждые 10 мин)
-  scan|reboot|summary|discover|check|test-notify|update|login|setup|status|log|web|selftest
+  scan|reboot|summary|discover|check|test-notify|login|setup|status|log|web|selftest
+  panel                 — открыть веб-панель в браузере (при необходимости — запустить)
   start|stop            — стартёр: git-обновление + все службы / полная остановка
   logs-push             — выгрузить логи и отчёты в ветку logs репозитория
   git-auth              — сохранить GitHub PAT для git pull/push без запроса пароля
@@ -120,31 +121,14 @@ def cmd_cron(args) -> int:
     cfg = cfgmod.load()
     now = datetime.datetime.now()
 
-    # 1) автообновление из Загрузок
-    if cfg.get("updater", {}).get("enabled", True):
-        try:
-            from . import updater
-            last = _ts("last_update_check_ts")
-            interval = int(cfg["updater"].get("update_check_minutes", 60)) * 60
-            if last is None or (now - last).total_seconds() >= interval:
-                db.kv_set("last_update_check_ts", db.now_iso())
-                res = updater.check_and_apply(cfg)
-                if res.get("applied"):
-                    # после обновления код поменялся — перезапустимся в следующий раз
-                    print("Обновление применено:", res.get("version"))
-                    return 0
-        except Exception as e:
-            log.exception("Ошибка автообновления: %s", e)
-            db.event("update", "Ошибка автообновления", str(e), severity="warn")
-
     actions = []
-    # 2) ребут производства
+    # 1) ребут производства
     if _due(now, cfg, "reboot"):
         actions.append("reboot")
-    # 3) скан ресурсов
+    # 2) скан ресурсов
     if _due(now, cfg, "scan"):
         actions.append("scan")
-    # 4) сводка дня
+    # 3) сводка дня
     st = str(cfg.get("schedules", {}).get("summary_time") or "20:00")
     m = re.match(r"^(\d{1,2}):(\d{2})$", st)
     if m:
@@ -228,14 +212,14 @@ def cmd_discover(args) -> int:
             json.dump(report, f, ensure_ascii=False, indent=2)
         print(f"✘ Discovery не удался: {type(e).__name__}: {e}")
         print(f"  Диагностика сохранена: {out}")
-        print("  Пришлите этот файл ассистенту — он определит причину.")
+        print("  Передать ассистенту: doomsday logs-push")
         return 1
     print(json.dumps(r, ensure_ascii=False, indent=2, default=str))
     out = os.path.join(paths.REPORTS_DIR, f"discovery-{db.now_iso().replace(':', '')}.json")
     with open(out, "w", encoding="utf-8") as f:
         json.dump(r, f, ensure_ascii=False, indent=2)
     print(f"\nОтчёт сохранён: {out}")
-    print("Отправьте этот файл разработчику ассистенту — он подготовит точные шаги API для ребута.")
+    print("Передать ассистенту: doomsday logs-push (выгрузит в ветку logs репозитория)")
     return 0
 
 
@@ -314,6 +298,7 @@ def cmd_setup(args) -> int:
 
 def cmd_status(args) -> int:
     cfg = cfgmod.load()
+    from . import starter as starter_mod
     now = datetime.datetime.now()
     ver = paths.read_version()
     last_reboot, last_scan = _ts("last_reboot_ts"), _ts("last_scan_ts")
@@ -327,6 +312,14 @@ def cmd_status(args) -> int:
           f"  → следующий ~{nr.strftime('%d.%m %H:%M') if last_reboot else '?'}")
     print(f"Последний скан:      {_fmt_delta((now - last_scan).total_seconds()) if last_scan else 'нет данных'}"
           f"  → следующий ~{ns.strftime('%d.%m %H:%M') if last_scan else '?'}")
+    farm = starter_mod.farm_deadline_info()
+    if farm.get("known"):
+        if farm["active"]:
+            print(f"Цикл производства:   активен, осталось {_fmt_delta(farm['left_sec'])} (до {farm['ends_at'][11:16]})")
+        else:
+            print(f"Цикл производства:   ИСТЁК {_fmt_delta(-farm['left_sec'])} — нужен ребут")
+    else:
+        print("Цикл производства:   нет данных (появится после первого скана/ребута)")
     res = db.resources_latest()
     if res:
         print("Ресурсы (последний скан):")
@@ -334,7 +327,9 @@ def cmd_status(args) -> int:
             mx = r.get("maximum")
             pct = f" ({r['current'] / mx * 100:.0f}%)" if mx else ""
             print(f"  - {r['name']}: {r['current']} / {mx if mx is not None else '?'}{pct} {r.get('state') or ''}")
-    print(f"Веб-панель:          http://{cfg['web'].get('host', '127.0.0.1')}:{cfg['web'].get('port', 8080)}")
+    url = starter_mod.panel_url(cfg)
+    print(f"Веб-панель:          {url}")
+    print("Открыть панель:      doomsday panel")
     return 0
 
 
@@ -349,14 +344,6 @@ def cmd_log(args) -> int:
     for line in lines[-n:]:
         print(line.rstrip())
     return 0
-
-
-def cmd_update(args) -> int:
-    from . import updater
-    cfg = cfgmod.load()
-    res = updater.check_and_apply(cfg, force=getattr(args, "force", False))
-    print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
-    return 0 if (res.get("applied") or not res.get("error")) else 1
 
 
 def cmd_start(args) -> int:
@@ -384,6 +371,11 @@ def cmd_web(args) -> int:
     cfg = cfgmod.load()
     webui.serve_forever(cfg)
     return 0
+
+
+def cmd_panel(args) -> int:
+    from . import starter
+    return starter.cmd_panel(args)
 
 
 # ---------------- selftest ----------------
@@ -476,10 +468,14 @@ def cmd_selftest(args) -> int:
           lambda: ((by_name.get("Uranus") or {}).get("state") == "склад переполнен",
                    str((by_name.get("Uranus") or {}).get("state"))))
 
-    print("selftest: версии обновлений")
-    from . import updater as upd
-    check("parse_version", lambda: (upd.parse_version("doomsday-bot-v1.2.3.zip") == (1, 2, 3), ""))
-    check("сравнение версий", lambda: (upd.version_cmp((1, 2, 0), (1, 2, 3)) < 0, ""))
+    print("selftest: чистка legacy-конфига")
+    legacy = {"updater": {"enabled": True}, "schedules": {"update_check_minutes": 30},
+              "notify": {"events": {"update_applied": True}}}
+    stripped = cfgmod._strip_legacy(cfgmod._deep_merge(cfgmod.DEFAULTS, legacy))
+    check("legacy-ключи вычищаются",
+          lambda: ("updater" not in stripped
+                   and "update_check_minutes" not in stripped["schedules"]
+                   and "update_applied" not in stripped["notify"]["events"], ""))
 
     print("selftest: БД")
     with tempfile.TemporaryDirectory() as tmp:
@@ -519,12 +515,11 @@ def main(argv=None) -> int:
     sub.add_parser("test-notify", help="тест push-уведомления")
     sub.add_parser("login", help="вход в Telegram (интерактивно)")
     sub.add_parser("setup", help="мастер настройки")
-    sub.add_parser("status", help="краткий статус")
+    sub.add_parser("status", help="краткий статус и таймеры")
     lg = sub.add_parser("log", help="хвост лога")
     lg.add_argument("-n", "--lines", type=int, default=50)
-    up = sub.add_parser("update", help="обновление из архива в Загрузках")
-    up.add_argument("--force", action="store_true", help="ставить даже ту же/старую версию")
     sub.add_parser("web", help="запустить веб-панель (обычно — сервисом)")
+    sub.add_parser("panel", help="открыть веб-панель в браузере")
     sub.add_parser("selftest", help="самопроверка без Telegram")
     sub.add_parser("start", help="стартёр: обновить из git и запустить всё")
     sub.add_parser("stop", help="остановить веб-панель и плановые проходы")
@@ -538,7 +533,7 @@ def main(argv=None) -> int:
     setup_logging(verbose=os.environ.get("DOOMSDAY_VERBOSE") == "1")
 
     wait_lock = args.cmd in ("reboot", "scan", "cron")
-    no_lock = {"web": cmd_web, "selftest": cmd_selftest, "setup": cmd_setup,
+    no_lock = {"web": cmd_web, "panel": cmd_panel, "selftest": cmd_selftest, "setup": cmd_setup,
                "status": cmd_status, "log": cmd_log, "test-notify": cmd_test_notify,
                "start": cmd_start, "stop": cmd_stop, "logs-push": cmd_logs_push,
                "logspush": cmd_logs_push, "git-auth": cmd_git_auth}
@@ -549,7 +544,7 @@ def main(argv=None) -> int:
         return {
             "cron": cmd_cron, "scan": cmd_scan, "reboot": cmd_reboot,
             "summary": cmd_summary, "discover": cmd_discover, "check": cmd_check,
-            "update": cmd_update, "login": cmd_login,
+            "login": cmd_login,
         }[args.cmd](args)
 
 

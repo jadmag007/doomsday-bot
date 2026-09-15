@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import os
 import re
 
 from . import config as cfgmod
@@ -431,7 +430,6 @@ async def action_discover(cfg: dict) -> dict:
 
 async def action_check(cfg: dict) -> dict:
     """Диагностика окружения. Возвращает список проверок [{name, ok, detail}]."""
-    from . import paths as paths_mod
     checks = []
 
     def add(name, ok, detail=""):
@@ -445,8 +443,8 @@ async def action_check(cfg: dict) -> dict:
     add("termux-notification", notify_mod.termux_notification_available(),
         "доступен" if notify_mod.termux_notification_available()
         else "нет: pkg install termux-api + приложение Termux:API (F-Droid)")
-    dl = paths_mod.resolve_download_dir(cfg.get("updater", {}).get("download_dir", ""))
-    add("Каталог Загрузок", os.path.isdir(dl), dl)
+    web_ok, web_detail = _panel_probe(cfg)
+    add("Веб-панель", web_ok, web_detail)
 
     try:
         client = await tgapi.connect(cfg)
@@ -480,10 +478,26 @@ async def action_check(cfg: dict) -> dict:
     return {"ok": ok_all, "checks": checks}
 
 
+def _panel_probe(cfg: dict):
+    """Отвечает ли веб-панель на localhost (2 сек). (True, url) / (False, подсказка)."""
+    import urllib.error
+    import urllib.request
+    from . import starter as starter_mod
+    url = starter_mod.panel_url(cfg)
+    try:
+        urllib.request.urlopen(url + "/api/overview", timeout=2)
+        return True, url
+    except urllib.error.HTTPError:
+        return True, url + " (PIN включён)"
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return False, f"не отвечает на {url} — запустите: doomsday panel"
+
+
 def os_path_exists_session(cfg: dict) -> bool:
     import os
     sp = tgapi.session_path(cfg) + ".session"
     return os.path.exists(sp)
+
 
 
 async def action_summary(cfg: dict) -> dict:

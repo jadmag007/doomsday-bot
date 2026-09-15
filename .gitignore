@@ -16,9 +16,6 @@ run/
 *.db
 *.db-wal
 *.db-shm
-.updates/
-.update-staging/
-.backup/
 worker.lock
 state.json
 

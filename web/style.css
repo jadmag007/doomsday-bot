@@ -68,7 +68,7 @@ main { max-width: 860px; margin: 0 auto; padding: .9rem .75rem; }
 
 /* таймеры */
 .timer-grid { display: grid; grid-template-columns: 1fr; gap: .75rem; margin-bottom: .9rem; }
-@media (min-width: 640px) { .timer-grid { grid-template-columns: 1fr 1fr; } }
+@media (min-width: 640px) { .timer-grid { grid-template-columns: repeat(3, 1fr); } }
 .timer { font-family: var(--mono); font-size: 2rem; color: var(--accent); letter-spacing: .04em; margin: .2rem 0; }
 .progress { height: 5px; border-radius: 3px; background: var(--bg2); overflow: hidden; margin-top: .5rem; }
 .progress-bar { height: 100%; background: linear-gradient(90deg, #ff8c42, var(--accent)); transition: width .5s; }

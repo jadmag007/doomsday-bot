@@ -5,8 +5,7 @@
   GET  /api/overview          — таймеры, ресурсы, версия, статусы
   GET  /api/config            — конфиг (api_hash замаскирован)
   PUT  /api/config            — сохранить конфиг
-  POST /api/action            — запустить действие (reboot/scan/summary/discover/
-                                check/test-notify/update/update-force)
+  POST /api/action            — запустить действие (reboot/scan/summary/discover/check/test-notify)
   GET  /api/runs, /api/runs/N — журнал запусков и лог конкретного запуска
   GET  /api/events            — журнал событий
   GET  /api/log               — хвост bot.log
@@ -27,7 +26,6 @@ from urllib.parse import urlparse, parse_qs
 from . import config as cfgmod
 from . import db
 from . import paths
-from . import updater as upd
 
 log = logging.getLogger("doomsday.webui")
 
@@ -136,7 +134,6 @@ def build_overview(cfg: dict) -> dict:
                           "pct": pct, "state": r.get("state") or "",
                           "ts": _iso_min(r.get("ts"))})
     discovery = db.kv_get("discovery") or {}
-    applied = upd.applied_archives()[-3:]
     running = db.running_run()
     checks = db.events_list(limit=5, kind="check")
     farm = starter_mod.farm_deadline_info()
@@ -148,7 +145,6 @@ def build_overview(cfg: dict) -> dict:
         "next_scan": next_scan.isoformat(timespec="seconds") if next_scan else None,
         "scan_in_sec": max(0, int((next_scan - now).total_seconds())) if next_scan else None,
         "last_summary": db.kv_get("last_summary_date"),
-        "last_update_check": _iso_min(db.kv_get("last_update_check_ts")),
         "reboot_interval_hours": hours,
         "scan_interval_minutes": minutes,
         "farm_cycle": {
@@ -165,18 +161,16 @@ def build_overview(cfg: dict) -> dict:
         "resources": resources,
         "running": running or None,
         "events": db.events_list(limit=12),
-        "discovery": {
-            "done": bool(discovery),
-            "origin": discovery.get("origin"),
-            "endpoints": (discovery.get("endpoints") or [])[:40],
-            "websockets": discovery.get("websockets") or [],
-            "ts": discovery.get("ts"),
-        },
-        "updates": {"applied": applied},
         "last_check_ok": checks[0].get("severity") == "info" if checks else None,
         "tma_configured": bool(tma_mod.get_steps(cfg, "scan") or tma_mod.get_steps(cfg, "reboot")),
         "tma_base_url": tma_mod.get_base_url(cfg),
         "tma_preset": not (cfg.get("tma", {}).get("steps_reboot") or cfg.get("tma", {}).get("steps_scan")),
+        "discovery": {
+            "done": bool(discovery),
+            "origin": discovery.get("origin"),
+            "api_base": (discovery or {}).get("api_base"),
+            "ts": (discovery or {}).get("ts"),
+        },
     }
 
 
@@ -331,7 +325,7 @@ class Handler(BaseHTTPRequestHandler):
     def _action(self, cfg):
         body = self._body()
         action = str(body.get("action") or "").strip()
-        allowed = {"reboot", "scan", "summary", "discover", "check", "test-notify", "update"}
+        allowed = {"reboot", "scan", "summary", "discover", "check", "test-notify"}
         if action not in allowed:
             return self._send_json({"error": f"неизвестное действие {action!r}"}, 400)
         rid = spawn_action(action)

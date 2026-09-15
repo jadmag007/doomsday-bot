@@ -15,26 +15,15 @@ LOG_DIR = os.path.join(APP_DIR, "logs")
 LOG_PATH = os.path.join(LOG_DIR, "bot.log")
 CRON_LOG_PATH = os.path.join(LOG_DIR, "cron.log")
 SESSION_DIR = os.path.join(APP_DIR, "session")
-UPDATES_DIR = os.path.join(APP_DIR, ".updates")
-STAGING_DIR = os.path.join(APP_DIR, ".update-staging")
-BACKUP_DIR = os.path.join(APP_DIR, ".backup")
 REPORTS_DIR = os.path.join(APP_DIR, "reports")
 WEB_DIR = os.path.join(APP_DIR, "web")
 BIN_DIR = os.path.join(APP_DIR, "bin")
 BIN_DOOMSDAY = os.path.join(BIN_DIR, "doomsday")
 LOCK_PATH = os.path.join(APP_DIR, "worker.lock")
 
-# Каталоги кода, которые заменяет обновление (всё остальное — пользовательские данные)
-CODE_ENTRIES = (
-    "lib", "web", "bin", "boot", "service",
-    "install.sh", "update.sh", "uninstall.sh", "start.sh", ".gitignore",
-    "README.md", "VERSION", "requirements.txt",
-)
-
-
 def ensure_dirs():
     """Создать служебные каталоги."""
-    for d in (LOG_DIR, SESSION_DIR, UPDATES_DIR, REPORTS_DIR, os.path.dirname(LOCK_PATH)):
+    for d in (LOG_DIR, SESSION_DIR, REPORTS_DIR, os.path.dirname(LOCK_PATH)):
         try:
             os.makedirs(d, exist_ok=True)
         except OSError:
@@ -59,29 +48,6 @@ def venv_python() -> str:
     if os.path.exists(cand):
         return cand
     return sys.executable or "python3"
-
-
-def download_dirs() -> list:
-    """Кандидаты каталога «Загрузки» телефона (по приоритету)."""
-    home = os.path.expanduser("~")
-    return [
-        os.path.join(home, "storage", "downloads"),
-        "/storage/emulated/0/Download",
-        "/sdcard/Download",
-        os.path.join(home, "downloads"),
-    ]
-
-
-def resolve_download_dir(preferred: str = "") -> str:
-    """Определить рабочий каталог Загрузок."""
-    if preferred:
-        if os.path.isdir(preferred):
-            return preferred
-        return preferred  # вернём как есть: каталог может появиться позже
-    for d in download_dirs():
-        if os.path.isdir(d):
-            return d
-    return download_dirs()[1]
 
 
 def is_termux() -> bool:
