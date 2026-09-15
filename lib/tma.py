@@ -19,6 +19,7 @@
 
 Контекст по умолчанию: init_data, webview_url, base_url, origin, now.
 """
+import copy
 import json
 import logging
 import re
@@ -66,6 +67,71 @@ def _compose_init_data(params: dict) -> str:
     if not any(k in params for k in keys):
         return ""
     return urllib.parse.urlencode({k: v for k, v in params.items() if k in keys})
+
+
+# ---------------- встроенный пресет API Doomsday ----------------
+
+# Протокол игры Doomsday Tyranny (реверс-инжиниринг web-приложения):
+# Firebase Cloud Functions (callable). Каждый вызов — POST на
+# {{base_url}}/<имяФункции> с телом {"data": {...аргументы, auth, session}},
+# где auth = СЫРАЯ строка tgWebAppData (точно как её выдаёт Telegram),
+# session = поле hash из неё. Ответ: {"result": ...} / {"error": ...}.
+# Свежесть auth_data критична: просроченная подпись → "sessionExpired",
+# поэтому каждый проход заново резолвит webview URL через Telethon.
+FIREBASE_PRESET = {
+    "version": 1,
+    "base_url": "https://us-central1-telegram-miracle-f1779.cloudfunctions.net",
+    "steps_reboot": [
+        {
+            "name": "rebootProduction",
+            "method": "POST",
+            "url": "{{base_url}}/rebootProduction",
+            "headers": {"Content-Type": "application/json"},
+            "body": {"data": {"auth": "{{init_data}}", "session": "{{session_hash}}"}},
+            "expect_status": [200],
+            "extract": {
+                "reboot_active": "result.active",
+                "reboot_started_at": "result.startedAt",
+                "reboot_ends_at": "result.endsAt",
+            },
+            "save": "reboot_raw",
+        },
+    ],
+    "steps_scan": [
+        {
+            "name": "initUser",
+            "method": "POST",
+            "url": "{{base_url}}/initUser",
+            "headers": {"Content-Type": "application/json"},
+            "body": {"data": {"auth": "{{init_data}}", "session": "{{session_hash}}"}},
+            "expect_status": [200],
+            "extract": {
+                "game_state": "result",
+                "farm_ends_at": "result.passiveFarm.endsAt",
+                "is_premium": "result.isPremium",
+            },
+            "save": "state_raw",
+        },
+    ],
+}
+
+
+def get_base_url(cfg: dict) -> str:
+    """Базовый URL API: явный tma.base_url > пресет > origin webview."""
+    tma_cfg = cfg.get("tma", {}) or {}
+    url = (tma_cfg.get("base_url") or "").strip()
+    if url:
+        return url.rstrip("/")
+    return FIREBASE_PRESET["base_url"].rstrip("/")
+
+
+def get_steps(cfg: dict, kind: str) -> list:
+    """Шаги для действия ('reboot'|'scan'): кастомные из конфига или пресет."""
+    tma_cfg = cfg.get("tma", {}) or {}
+    custom = tma_cfg.get(f"steps_{kind}") or []
+    if custom:
+        return custom
+    return copy.deepcopy(FIREBASE_PRESET.get(f"steps_{kind}") or [])
 
 
 # ---------------- шаблоны и JSON-пути ----------------
@@ -205,13 +271,24 @@ def run_steps(steps: list, ctx: dict, timeout: int = 25) -> dict:
 
 
 def build_context(cfg: dict, webview_url: str) -> dict:
-    """Стартовый контекст для шагов."""
+    """Стартовый контекст для шагов.
+
+    Переменные: init_data (сырая строка tgWebAppData), session_hash (поле hash
+    из неё — игра шлёт его как session), base_url (tma.base_url > пресет > origin).
+    """
     info = parse_webview_url(webview_url)
     base_url = (cfg.get("tma", {}).get("base_url") or "").strip()
-    if not base_url and info["origin"]:
-        base_url = info["origin"]
+    if not base_url:
+        base_url = FIREBASE_PRESET["base_url"]
+    session_hash = ""
+    try:
+        session_hash = dict(urllib.parse.parse_qsl(
+            info["init_data"], keep_blank_values=True)).get("hash", "") or ""
+    except ValueError:
+        session_hash = ""
     return {
         "init_data": info["init_data"],
+        "session_hash": session_hash,
         "webview_url": webview_url,
         "base_url": base_url.rstrip("/"),
         "origin": info["origin"],
@@ -225,6 +302,11 @@ _LINK_HREF_RE = re.compile(r'<link[^>]+href=["\']([^"\']+)["\']', re.I)
 _API_PATH_RE = re.compile(r'["\'`](/(?:api|v\d|game|backend|server)[A-Za-z0-9_\-/.]{1,90})["\'`]')
 _WSS_RE = re.compile(r'wss?://[A-Za-z0-9._\-:/?=&%]{3,120}')
 _ABS_API_RE = re.compile(r'https?://[A-Za-z0-9.\-]+/[A-Za-z0-9_\-/.]*(?:api|auth|game|user|state|reboot|prod)[A-Za-z0-9_\-/.]{0,60}')
+
+# Firebase-конфиг в JS-бандле: apiKey:"...",...,projectId:"..."
+_FB_CFG_RE = re.compile(r'apiKey:"([A-Za-z0-9_\-]{20,60})"[^{}]{0,400}?projectId:"([a-z0-9\-]{4,40})"')
+_FB_FUNCTIONS_HOST_RE = re.compile(
+    r'https?://([a-z0-9\-]{4,20})-([a-z0-9\-]{4,40})\.cloudfunctions\.net')
 
 
 def discover_endpoints(webview_url: str, timeout: int = 25, max_scripts: int = 12) -> dict:
@@ -269,9 +351,54 @@ def discover_endpoints(webview_url: str, timeout: int = 25, max_scripts: int = 1
     report["endpoints"] = sorted(set(_API_PATH_RE.findall(blob)))[:200]
     report["websockets"] = sorted(set(_WSS_RE.findall(blob)))[:20]
     report["absolute_urls"] = sorted(set(_ABS_API_RE.findall(blob)))[:100]
-    if not report["endpoints"] and not report["absolute_urls"]:
+
+    # --- Firebase: конфиг в бандле + живая проверка callable-эндпоинта ---
+    fb_projects = sorted(set(_FB_CFG_RE.findall(blob)))
+    fb_hosts = _FB_FUNCTIONS_HOST_RE.findall(blob)
+    candidates = []
+    for region, project in fb_hosts:
+        candidates.append((region, project))
+    for _key, project in fb_projects:
+        candidates.append(("us-central1", project))  # регион по умолчанию Firebase
+    seen, api_base, api_check = set(), "", None
+    for region, project in candidates:
+        if (region, project) in seen or len(seen) >= 3:
+            continue
+        seen.add((region, project))
+        base = f"https://{region}-{project}.cloudfunctions.net"
+        try:
+            status, _, text = http_request(
+                "POST", base + "/syncTime",
+                headers={"Content-Type": "application/json"}, body={"data": {}},
+                timeout=timeout)
+            parsed = _json_loads(text)
+            if status == 200 and isinstance(parsed, dict) and "result" in parsed:
+                api_base, api_check = base, {"probed": "/syncTime", "status": status,
+                                            "response": text[:200]}
+                break
+        except TmaError:
+            continue
+    if api_base:
+        report["api_base"] = api_base
+        report["api_check"] = api_check
+        report["notes"].append(
+            f"Найден работающий API Firebase Cloud Functions: {api_base} "
+            "(проверен синхронизацией времени /syncTime)")
+    elif fb_projects:
+        report["notes"].append(
+            "Найден Firebase-конфиг (projectId: " + ", ".join(p for _k, p in fb_projects)
+            + "), но callable-эндпоинт не ответил — возможен другой регион")
+
+    if not report["endpoints"] and not report["absolute_urls"] and not api_base:
         report["notes"].append(
             "API-пути не найдены статически: возможно, приложение собирает запросы динамически "
             "или работает через WebSocket. Изучите список скриптов вручную."
         )
     return report
+
+
+def _json_loads(text):
+    try:
+        return json.loads(text) if text else None
+    except ValueError:
+        return None

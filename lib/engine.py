@@ -106,6 +106,75 @@ def parse_chat_alerts(messages: list, patterns: list) -> list:
     return alerts
 
 
+# ---------------- парсер состояния Doomsday Tyranny ----------------
+
+def parse_resources_doomsday(state: dict) -> list:
+    """Ресурсы из ответа initUser игры Doomsday Tyranny.
+
+    Структура (реверс web-приложения): gameStats.mines[resourceId] содержит
+    passive.{workerCount,isPaused,craftPerMinute,craftPerMinuteReal},
+    store.count, levelStore, usagePerMinute; passiveFarm.endsAt (epoch мс) —
+    конец текущего цикла производства. Ёмкости складов — из статической
+    таблицы игры (lib/game_data.py). Состояния считаем той же логикой,
+    что и интерфейс игры (idle → требуется ребут → пауза → дефициты → полон).
+    """
+    from . import game_data
+    import time as _time
+
+    if not isinstance(state, dict):
+        return []
+    mines = ((state.get("gameStats") or {}).get("mines")) or {}
+    if not isinstance(mines, dict):
+        return []
+    farm = state.get("passiveFarm") or {}
+    ends_at = farm.get("endsAt") or 0
+    farm_active = isinstance(ends_at, (int, float)) and ends_at >= _time.time() * 1000
+
+    rows = []
+    for rid, mine in mines.items():
+        if not isinstance(mine, dict) or not isinstance(mine.get("passive"), dict):
+            continue  # шахта ещё не открыта
+        passive = mine["passive"]
+        store = mine.get("store") or {}
+        count = _num(store.get("count"))
+        workers = _num(passive.get("workerCount")) or 0
+        caps = game_data.CAPACITIES.get(rid) or []
+        cap = None
+        if caps:
+            level = mine.get("levelStore")
+            idx = level if isinstance(level, int) and 0 <= level < len(caps) else (1 if len(caps) > 1 else 0)
+            cap = float(caps[idx])
+        craft = _num(passive.get("craftPerMinute"))
+        craft_real = _num(passive.get("craftPerMinuteReal"))
+        usage = _num(mine.get("usagePerMinute"))
+        # порядок проверок повторяет логику интерфейса игры
+        if workers == 0:
+            st = "простаивает"
+        elif not farm_active:
+            st = "требуется ребут"
+        elif passive.get("isPaused"):
+            st = "пауза"
+        elif craft_real is not None and craft is not None and craft_real < craft:
+            st = "нехватка компонентов"
+        elif craft is not None and usage is not None and craft < usage:
+            st = "дефицит"
+        elif cap is not None and count is not None and count >= cap:
+            st = "склад переполнен"
+        else:
+            st = ""
+        name = game_data.NAMES.get(rid, rid)
+        rows.append(_mk_resource(name, count, cap, st))
+    return rows
+
+
+def _fmt_ms_deadline(ends_at_ms) -> str:
+    """Человекочитаемый дедлайн цикла из epoch-миллисекунд."""
+    if not isinstance(ends_at_ms, (int, float)):
+        return "?"
+    import datetime as _dt
+    return _dt.datetime.fromtimestamp(ends_at_ms / 1000).strftime("%d.%m %H:%M")
+
+
 # ---------------- действия ----------------
 
 async def action_scan(cfg: dict) -> dict:
@@ -132,43 +201,61 @@ async def action_scan(cfg: dict) -> dict:
         result["chat_alerts"] = alerts
 
         # 2) TMA API скан состояния
-        if tma_cfg.get("enabled", True) and (tma_cfg.get("steps_scan") or []):
+        steps_scan = tma.get_steps(cfg, "scan")
+        if tma_cfg.get("enabled", True) and steps_scan:
             webview_url = await tgapi.resolve_webview_url(client, bot, cfg)
             ctx = tma.build_context(cfg, webview_url)
-            outcome = tma.run_steps(tma_cfg.get("steps_scan"), ctx,
-                                    timeout=int(tma_cfg.get("timeout_seconds", 25)))
+            outcome = tma.run_steps(steps_scan, ctx,
+                                    timeout=int(tma_cfg.get("timeout_seconds", 35)))
             result["steps"] = outcome["results"]
             result["ok"] = outcome["ok"]
             if not outcome["ok"]:
                 raise RuntimeError("Шаги скана TMA провалились: " + json.dumps(
                     [r for r in outcome["results"] if r["status"] == "fail"], ensure_ascii=False))
-            # ресурсы: из последнего ответа JSON или из сырого текста
-            resources = []
-            last_json = None
-            for var_val in outcome["ctx"].values():
-                if isinstance(var_val, (dict, list)):
-                    last_json = var_val
-            res_cfg = tma_cfg.get("resources") or {}
-            if last_json is not None:
-                resources = parse_resources_from_json(last_json, res_cfg)
-            if not resources:
-                raw = outcome["ctx"].get("state_raw") or ""
-                if raw:
-                    try:
-                        resources = parse_resources_from_json(json.loads(raw), res_cfg)
-                    except ValueError:
-                        resources = parse_resources_from_text(raw, res_cfg.get("text_patterns"))
-            result["resources"] = resources
+            # состояние Doomsday: initUser → gameStats.mines + passiveFarm
+            state = outcome["ctx"].get("game_state")
+            resources = parse_resources_doomsday(state) if isinstance(state, dict) else []
             if resources:
+                result["resources"] = resources
                 db.resource_snapshot(resources)
                 _check_thresholds(cfg, resources)
+                # цикл производства: дедлайн и сигнал «требуется ребут»
+                farm_ends_at = outcome["ctx"].get("farm_ends_at")
+                if isinstance(farm_ends_at, (int, float)):
+                    db.kv_set("passive_farm_ends_at", str(int(farm_ends_at)))
+                    import time as _t
+                    if farm_ends_at <= _t.time() * 1000:
+                        _notify_reboot_needed(cfg)
+                    else:
+                        db.kv_set("notified_reboot_needed", [])
+                result["farm_ends_at"] = farm_ends_at
             else:
-                result["notes"].append(
-                    "Ресурсы не распознаны: проверьте tma.resources (json_path/fields или text_patterns)"
-                )
-                db.event("scan", "Скан: ресурсы не распознаны",
-                         "Ответ API получен, но паттерны ничего не нашли — настройте tma.resources",
-                         severity="warn")
+                # универсальный путь: из последнего JSON-ответа или сырого текста
+                last_json = None
+                for var_val in outcome["ctx"].values():
+                    if isinstance(var_val, (dict, list)):
+                        last_json = var_val
+                res_cfg = tma_cfg.get("resources") or {}
+                if last_json is not None:
+                    resources = parse_resources_from_json(last_json, res_cfg)
+                if not resources:
+                    raw = outcome["ctx"].get("state_raw") or ""
+                    if raw:
+                        try:
+                            resources = parse_resources_from_json(json.loads(raw), res_cfg)
+                        except ValueError:
+                            resources = parse_resources_from_text(raw, res_cfg.get("text_patterns"))
+                result["resources"] = resources
+                if resources:
+                    db.resource_snapshot(resources)
+                    _check_thresholds(cfg, resources)
+                else:
+                    result["notes"].append(
+                        "Ресурсы не распознаны: проверьте tma.resources (json_path/fields или text_patterns)"
+                    )
+                    db.event("scan", "Скан: ресурсы не распознаны",
+                             "Ответ API получен, но паттерны ничего не нашли — настройте tma.resources",
+                             severity="warn")
         else:
             result["notes"].append(
                 "TMA-скан не настроен (tma.steps_scan пуст). Выполнялся только мониторинг чата бота."
@@ -180,6 +267,20 @@ async def action_scan(cfg: dict) -> dict:
         return result
     finally:
         await client.disconnect()
+
+
+def _notify_reboot_needed(cfg: dict) -> None:
+    """Однократное уведомление: цикл производства истёк, нужен ребут."""
+    if db.kv_get("notified_reboot_needed"):
+        return
+    if cfg.get("notify", {}).get("events", {}).get("reboot_needed", True):
+        notify_mod.notify(
+            cfg, "reboot_needed", "Требуется ребут производства",
+            "Цикл производства истёк — ресурсы не производятся. "
+            "Бот сделает ребут автоматически в ближайший проход, "
+            "или откройте игру и перезапустите цикл вручную.",
+            high=True, open_game=True)
+    db.kv_set("notified_reboot_needed", [db.now_iso()])
 
 
 def _check_thresholds(cfg: dict, resources: list) -> None:
@@ -223,7 +324,7 @@ def _fmt(v):
 
 
 async def action_reboot(cfg: dict) -> dict:
-    """Ребут производства: /start боту + TMA API шаги (если настроены)."""
+    """Ребут производства: TMA API rebootProduction (встроенный пресет Doomsday)."""
     result = {"ok": True, "steps": [], "notes": []}
     tma_cfg = cfg.get("tma", {})
     client = await tgapi.connect(cfg)
@@ -232,13 +333,19 @@ async def action_reboot(cfg: dict) -> dict:
         if cfg.get("chat", {}).get("send_start_on_reboot", True):
             await tgapi.send_start(client, bot, "/start")
             result["steps"].append({"name": "chat:/start", "status": "ok", "detail": "Отправлен /start боту"})
-        steps = tma_cfg.get("steps_reboot") or []
+        steps = tma.get_steps(cfg, "reboot")
         if tma_cfg.get("enabled", True) and steps:
             webview_url = await tgapi.resolve_webview_url(client, bot, cfg)
             ctx = tma.build_context(cfg, webview_url)
-            outcome = tma.run_steps(steps, ctx, timeout=int(tma_cfg.get("timeout_seconds", 25)))
+            outcome = tma.run_steps(steps, ctx, timeout=int(tma_cfg.get("timeout_seconds", 35)))
             result["steps"] += outcome["results"]
             result["ok"] = outcome["ok"]
+            ends_at = outcome["ctx"].get("reboot_ends_at")
+            if outcome["ok"] and isinstance(ends_at, (int, float)):
+                db.kv_set("passive_farm_ends_at", str(int(ends_at)))
+                db.kv_set("notified_reboot_needed", [])
+                result["farm_ends_at"] = ends_at
+                result["cycle_until"] = _fmt_ms_deadline(ends_at)
         else:
             # TMA не настроен: «вход в игру» через webview + уведомление с кнопкой
             try:
@@ -258,13 +365,16 @@ async def action_reboot(cfg: dict) -> dict:
             db.kv_set("last_reboot_ts", db.now_iso())
             db.kv_set("notified_full", [])
             db.kv_set("notified_warn", [])
-        body = json.dumps(result["steps"], ensure_ascii=False)
+        body = json.dumps({"steps": result["steps"], "cycle_until": result.get("cycle_until")},
+                          ensure_ascii=False)
         db.event("reboot", "Ребут производства" if result["ok"] else "Ребут: ошибка",
                  body, severity="info" if result["ok"] else "critical")
         if result["ok"] and cfg.get("notify", {}).get("events", {}).get("reboot_report", True):
             ok_steps = [s["name"] for s in result["steps"] if s["status"] == "ok"]
+            extra = (f". Новый цикл до {result['cycle_until']}"
+                     if result.get("cycle_until") else "")
             notify_mod.notify(cfg, "reboot_report", "Производство перезапущено",
-                              "Шаги: " + (", ".join(ok_steps) if ok_steps else "нет данных"),
+                              "Шаги: " + (", ".join(ok_steps) if ok_steps else "нет данных") + extra,
                               open_game=False)
         elif not result["ok"]:
             failed = [f"{s['name']}: {s['detail']}" for s in result["steps"] if s["status"] == "fail"]
@@ -301,6 +411,14 @@ async def action_discover(cfg: dict) -> dict:
         )
         report["webview_url"] = webview_url
         report["game_bot"] = "@" + (real or "?")
+        # найден работающий API (Firebase callable, проверен /syncTime) —
+        # фиксируем base_url в конфиге, если он отличается от текущего
+        api_base = report.get("api_base")
+        if api_base and (cfg.get("tma", {}).get("base_url") or "").rstrip("/") != api_base:
+            cfg.setdefault("tma", {})["base_url"] = api_base
+            cfgmod.save(cfg)
+            db.event("config", "tma.base_url обновлён",
+                     json.dumps({"now": api_base}, ensure_ascii=False), severity="warning")
         db.kv_set("discovery", report)
         db.event("discover", "Discovery API игры",
                  json.dumps({"endpoints": report.get("endpoints", [])[:30],
@@ -339,8 +457,9 @@ async def action_check(cfg: dict) -> dict:
                 url = await tgapi.resolve_webview_url(client, bot, cfg)
                 origin = tma.parse_webview_url(url)["origin"]
                 add("Mini App (webview URL)", True, origin or url[:80])
-                if (cfg.get("tma", {}).get("steps_scan") or cfg.get("tma", {}).get("steps_reboot")):
-                    add("TMA API шаги", True, "настроены")
+                if tma.get_steps(cfg, "scan") or tma.get_steps(cfg, "reboot"):
+                    add("TMA API шаги", True,
+                        "встроенный пресет Doomsday (base_url: " + tma.get_base_url(cfg) + ")")
                 else:
                     add("TMA API шаги", False, "не настроены — запустите doomsday discover")
             except tgapi.TgError as e:
@@ -369,6 +488,7 @@ def os_path_exists_session(cfg: dict) -> bool:
 
 async def action_summary(cfg: dict) -> dict:
     """Ежедневная сводка: ресурсы, счётчики, таймеры."""
+    from . import starter as starter_mod
     resources = db.resources_latest()
     today = db.now_iso()[:10]
     evs = db.events_list(limit=200)
@@ -376,6 +496,13 @@ async def action_summary(cfg: dict) -> dict:
     scans = sum(1 for e in evs if e["kind"] == "scan" and (e["ts"] or "").startswith(today))
     errors = sum(1 for e in evs if e["severity"] == "critical" and (e["ts"] or "").startswith(today))
     lines = []
+    farm = starter_mod.farm_deadline_info()
+    if farm.get("known"):
+        if farm["active"]:
+            h, m = farm["left_sec"] // 3600, (farm["left_sec"] % 3600) // 60
+            lines.append(f"Цикл производства активен ещё {h} ч {m:02d} мин (до {farm['ends_at'][11:16]})")
+        else:
+            lines.append("Цикл производства ИСТЁК — нужен ребут")
     if resources:
         top = sorted(resources, key=lambda r: -(r.get("current") or 0))[:8]
         for r in top:

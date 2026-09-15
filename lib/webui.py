@@ -112,6 +112,8 @@ def spawn_action(action: str) -> int:
 
 def build_overview(cfg: dict) -> dict:
     import datetime
+    from . import starter as starter_mod
+    from . import tma as tma_mod
     now = datetime.datetime.now()
 
     def since(key):
@@ -137,21 +139,29 @@ def build_overview(cfg: dict) -> dict:
     applied = upd.applied_archives()[-3:]
     running = db.running_run()
     checks = db.events_list(limit=5, kind="check")
+    farm = starter_mod.farm_deadline_info()
+    timers = {
+        "last_reboot": _iso_min(db.kv_get("last_reboot_ts")),
+        "next_reboot": next_reboot.isoformat(timespec="seconds") if next_reboot else None,
+        "reboot_in_sec": max(0, int((next_reboot - now).total_seconds())) if next_reboot else None,
+        "last_scan": _iso_min(db.kv_get("last_scan_ts")),
+        "next_scan": next_scan.isoformat(timespec="seconds") if next_scan else None,
+        "scan_in_sec": max(0, int((next_scan - now).total_seconds())) if next_scan else None,
+        "last_summary": db.kv_get("last_summary_date"),
+        "last_update_check": _iso_min(db.kv_get("last_update_check_ts")),
+        "reboot_interval_hours": hours,
+        "scan_interval_minutes": minutes,
+        "farm_cycle": {
+            "known": farm.get("known", False),
+            "ends_at": farm.get("ends_at"),
+            "left_sec": farm.get("left_sec"),
+            "active": farm.get("active"),
+        },
+    }
     return {
         "version": paths.read_version(),
         "now": db.now_iso(),
-        "timers": {
-            "last_reboot": _iso_min(db.kv_get("last_reboot_ts")),
-            "next_reboot": next_reboot.isoformat(timespec="seconds") if next_reboot else None,
-            "reboot_in_sec": max(0, int((next_reboot - now).total_seconds())) if next_reboot else None,
-            "last_scan": _iso_min(db.kv_get("last_scan_ts")),
-            "next_scan": next_scan.isoformat(timespec="seconds") if next_scan else None,
-            "scan_in_sec": max(0, int((next_scan - now).total_seconds())) if next_scan else None,
-            "last_summary": db.kv_get("last_summary_date"),
-            "last_update_check": _iso_min(db.kv_get("last_update_check_ts")),
-            "reboot_interval_hours": hours,
-            "scan_interval_minutes": minutes,
-        },
+        "timers": timers,
         "resources": resources,
         "running": running or None,
         "events": db.events_list(limit=12),
@@ -164,7 +174,9 @@ def build_overview(cfg: dict) -> dict:
         },
         "updates": {"applied": applied},
         "last_check_ok": checks[0].get("severity") == "info" if checks else None,
-        "tma_configured": bool(cfg.get("tma", {}).get("steps_reboot") or cfg.get("tma", {}).get("steps_scan")),
+        "tma_configured": bool(tma_mod.get_steps(cfg, "scan") or tma_mod.get_steps(cfg, "reboot")),
+        "tma_base_url": tma_mod.get_base_url(cfg),
+        "tma_preset": not (cfg.get("tma", {}).get("steps_reboot") or cfg.get("tma", {}).get("steps_scan")),
     }
 
 

@@ -11,6 +11,8 @@ session/
 # --- рантайм-артефакты ---
 logs/
 reports/
+logsbuf/
+run/
 *.db
 *.db-wal
 *.db-shm

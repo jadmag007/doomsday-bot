@@ -4,6 +4,9 @@
 Запускается через bin/doomsday. Поддерживает:
   cron                  — плановый проход (вызывается cronie каждые 10 мин)
   scan|reboot|summary|discover|check|test-notify|update|login|setup|status|log|web|selftest
+  start|stop            — стартёр: git-обновление + все службы / полная остановка
+  logs-push             — выгрузить логи и отчёты в ветку logs репозитория
+  git-auth              — сохранить GitHub PAT для git pull/push без запроса пароля
 """
 import argparse
 import datetime
@@ -356,6 +359,26 @@ def cmd_update(args) -> int:
     return 0 if (res.get("applied") or not res.get("error")) else 1
 
 
+def cmd_start(args) -> int:
+    from . import starter
+    return starter.cmd_start(args)
+
+
+def cmd_stop(args) -> int:
+    from . import starter
+    return starter.cmd_stop(args)
+
+
+def cmd_logs_push(args) -> int:
+    from . import logspush
+    return logspush.cmd_logs_push(args)
+
+
+def cmd_git_auth(args) -> int:
+    from . import logspush
+    return logspush.cmd_git_auth(args)
+
+
 def cmd_web(args) -> int:
     from . import webui
     cfg = cfgmod.load()
@@ -414,6 +437,45 @@ def cmd_selftest(args) -> int:
     check("json_path", lambda: (tma_mod.json_path({"a": {"b": [10, 20]}}, "a.b[1]") == 20, ""))
     check("запуск пустого конвейера шагов", lambda: (tma_mod.run_steps([], {})["ok"] is True, ""))
 
+    print("selftest: пресет Doomsday (Firebase callable)")
+    # реальный формат webview URL игры: hash и session_hash из tgWebAppData
+    wv = ("https://telegram-miracle-f1779.web.app/#tgWebAppData="
+          "user%3D%257B%2522id%2522%253A1%257D%26auth_date%3D1700000000"
+          "%26hash%3Dabc123deadbeef&tgWebAppVersion=9.6")
+    bctx = tma_mod.build_context({"tma": {"base_url": ""}}, wv)
+    check("session_hash из tgWebAppData",
+          lambda: (bctx["session_hash"] == "abc123deadbeef", bctx["session_hash"]))
+    steps = tma_mod.get_steps({"tma": {}}, "reboot")
+    check("пресет шагов ребута", lambda: (bool(steps) and steps[0]["url"].endswith("/rebootProduction"), ""))
+    rendered = tma_mod.render_template(steps[0]["body"], {
+        "init_data": "user=1&hash=abc", "session_hash": "abc"})
+    check("тело запроса callable",
+          lambda: (rendered == {"data": {"auth": "user=1&hash=abc", "session": "abc"}}, ""))
+    check("кастомные шаги важнее пресета",
+          lambda: (tma_mod.get_steps({"tma": {"steps_reboot": [{"url": "x"}]}}, "reboot") == [{"url": "x"}], ""))
+
+    print("selftest: парсер состояния Doomsday")
+    fake_state = {
+        "passiveFarm": {"active": True, "endsAt": (__import__("time").time() + 3600) * 1000},
+        "gameStats": {"mines": {
+            "start_res1": {"levelStore": 2, "store": {"count": 9900}, "usagePerMinute": 1,
+                            "passive": {"workerCount": 5, "craftPerMinute": 2,
+                                        "craftPerMinuteReal": 2, "progress": 0}},
+            "uranus": {"levelStore": 0, "store": {"count": 118800}, "usagePerMinute": 0,
+                        "passive": {"workerCount": 3, "isPaused": False,
+                                    "craftPerMinute": 1, "craftPerMinuteReal": 1}},
+            "locked": {"store": {"count": 0}},
+        }},
+    }
+    rows = engine.parse_resources_doomsday(fake_state)
+    by_name = {r["name"]: r for r in rows}
+    check("ресурсы Doomsday из initUser", lambda: (len(rows) == 2 and "Сoal" in by_name, str(len(rows))))
+    coal = by_name.get("Сoal") or {}
+    check("ёмкость по levelStore", lambda: (coal.get("max") == 10000.0, str(coal.get("max"))))
+    check("склад полон определяется",
+          lambda: ((by_name.get("Uranus") or {}).get("state") == "склад переполнен",
+                   str((by_name.get("Uranus") or {}).get("state"))))
+
     print("selftest: версии обновлений")
     from . import updater as upd
     check("parse_version", lambda: (upd.parse_version("doomsday-bot-v1.2.3.zip") == (1, 2, 3), ""))
@@ -464,17 +526,24 @@ def main(argv=None) -> int:
     up.add_argument("--force", action="store_true", help="ставить даже ту же/старую версию")
     sub.add_parser("web", help="запустить веб-панель (обычно — сервисом)")
     sub.add_parser("selftest", help="самопроверка без Telegram")
+    sub.add_parser("start", help="стартёр: обновить из git и запустить всё")
+    sub.add_parser("stop", help="остановить веб-панель и плановые проходы")
+    lp = sub.add_parser("logs-push", aliases=["logspush"],
+                        help="выгрузить логи/отчёты в ветку logs репозитория")
+    lp.add_argument("-m", "--message", default="", help="подпись к выгрузке")
+    ga = sub.add_parser("git-auth", help="сохранить GitHub PAT (git без пароля)")
+    ga.add_argument("--token", default="", help="токен (иначе — скрытый ввод)")
     args = p.parse_args(argv)
 
     setup_logging(verbose=os.environ.get("DOOMSDAY_VERBOSE") == "1")
 
     wait_lock = args.cmd in ("reboot", "scan", "cron")
-    if args.cmd in ("web", "selftest", "setup", "status", "log", "test-notify"):
-        handler = {
-            "web": cmd_web, "selftest": cmd_selftest, "setup": cmd_setup,
-            "status": cmd_status, "log": cmd_log, "test-notify": cmd_test_notify,
-        }[args.cmd]
-        return handler(args)
+    no_lock = {"web": cmd_web, "selftest": cmd_selftest, "setup": cmd_setup,
+               "status": cmd_status, "log": cmd_log, "test-notify": cmd_test_notify,
+               "start": cmd_start, "stop": cmd_stop, "logs-push": cmd_logs_push,
+               "logspush": cmd_logs_push, "git-auth": cmd_git_auth}
+    if args.cmd in no_lock:
+        return no_lock[args.cmd](args)
 
     with SingleInstance(wait=wait_lock):
         return {

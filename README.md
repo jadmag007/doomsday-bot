@@ -96,31 +96,43 @@ webview-URL (`RequestAppWebView`, short name `play`) и выполняет HTTP-
 в назначенное время придёт уведомление с кнопкой **«Открыть игру»** — вы
 перезапускаете производство в два тапа вручную.
 
-## 5. Настройка автоматического ребута (TMA API)
+## 5. Автоматический ребут (TMA API) — уже встроен
 
-1. Запустите `doomsday discover` (или кнопку на вкладке **API / Discovery**).
-   Он откроет Mini App от вашего имени, скачает JS-бандл игры и вытащит список
-   HTTP-эндпоинтов (отчёт: `~/doomsday-bot/reports/discovery-*.json` + в панели).
-2. **Проще всего**: пришлите этот отчёт ассистенту, который вам выдал бота —
-   он соберёт архив `doomsday-bot-v1.1.0.zip` с готовыми шагами под текущее API
-   игры. Положите архив в Загрузки — автообновление применит его само.
-3. Либо настройте шаги сами на вкладке **API / Discovery**: последовательность
-   HTTP-запросов с подстановкой `{{init_data}}`, `{{base_url}}` и извлечением
-   значений (`extract`) для следующих шагей. Пример:
+Начиная с v1.3.0 точные шаги API игры **встроены в бота** (пресет «Doomsday
+Firebase callable»): ничего настраивать не нужно. Протокол (реверс-инжиниринг
+web-приложения игры): каждый вызов — POST на
+`https://us-central1-telegram-miracle-f1779.cloudfunctions.net/<функция>` с телом
+`{"data": {…аргументы, auth, session}}`, где `auth` — сырая строка tgWebAppData,
+а `session` — поле hash из неё. Бот сам получает свежую подпись через Telethon
+и вызывает:
+
+- **reboot** → функция `rebootProduction` (без аргументов) — ответ содержит
+  `{active, startedAt, endsAt}`: бот сохраняет дедлайн цикла, и в панели/сводке
+  виден обратный отсчёт;
+- **scan** → функция `initUser` — полное состояние игры: склады всех шахт,
+  паузы/дефициты/перегрузки + дедлайн цикла. Состояния считаются той же логикой,
+  что и в интерфейсе игры (простаивает / требуется ребут / пауза / дефицит /
+  склад переполнен).
+
+Если игра сменит сервер, `doomsday discover` найдёт её Firebase-конфиг в
+JS-бандле, проверит рабочий эндпоинт синхронизацией времени `/syncTime` и сам
+обновит `tma.base_url` в настройках.
+
+Кастомизация (не обязательна): на вкладке **API / Discovery** можно задать свои
+`steps_reboot`/`steps_scan` — они переопределят пресет. Доступные переменные:
+`{{init_data}}`, `{{session_hash}}`, `{{base_url}}`, плюс `extract` — извлечение
+значений из JSON-ответа по путям. Пример шага:
 
 ```json
 [
-  { "name": "auth", "method": "POST", "url": "{{base_url}}/api/v1/auth",
-    "body": { "initData": "{{init_data}}" },
-    "extract": { "token": "token" } },
-  { "name": "reboot", "method": "POST",
-    "url": "{{base_url}}/api/v1/production/reboot",
-    "headers": { "Authorization": "Bearer {{token}}" } }
+  { "name": "rebootProduction", "method": "POST",
+    "url": "{{base_url}}/rebootProduction",
+    "body": { "data": { "auth": "{{init_data}}", "session": "{{session_hash}}" } },
+    "extract": { "reboot_ends_at": "result.endsAt" } }
 ]
 ```
 
-Для скана — аналогично, плюс извлечение ресурсов: `json_path` до массива
-ресурсов и имена полей (имя/текущее/максимум), либо text-паттерны (regex).
+Для скана — аналогично (в пресете: `initUser` → полный стейт игры).
 
 ## 6. Веб-панель
 
@@ -152,10 +164,14 @@ webview-URL (`RequestAppWebView`, short name `play`) и выполняет HTTP-
 ## 8. Команды
 
 ```
+doomsday start         стартёр: git-обновление + все службы одним запуском
+doomsday stop          остановить веб-панель и плановые проходы
 doomsday cron          плановый проход (его и дёргает cron каждые 10 минут)
 doomsday scan|reboot   скан / ребут прямо сейчас
 doomsday summary       сводка дня вручную
-doomsday discover      поиск API игры
+doomsday discover      поиск API игры (+ самопроверка эндпоинта)
+doomsday logs-push     выгрузить логи и отчёты в ветку logs репозитория
+doomsday git-auth      сохранить GitHub PAT (git без запроса пароля)
 doomsday check         диагностика (конфиг, сессия, бот, webview, уведомления)
 doomsday test-notify   тест push-уведомления
 doomsday login         вход в Telegram (интерактивно)
@@ -172,16 +188,19 @@ doomsday selftest      самопроверка без Telegram
 ```
 ~/doomsday-bot/
 ├── bin/doomsday        CLI (bash)
-├── lib/                python: worker, engine, tgapi, tma, webui, updater, config, db, notify
+├── lib/                python: worker, engine, tgapi, tma, starter, logspush,
+│                       webui, updater, game_data, config, db, notify
 ├── web/                веб-панель (index.html, app.js, style.css)
 ├── boot/               скрипт для Termux:Boot
 ├── service/            runit-сервис веб-панели
-├── install.sh|update.sh|uninstall.sh
+├── install.sh|update.sh|uninstall.sh|start.sh
 ├── VERSION|requirements.txt|README.md
 ├── config.json         ваши настройки (600)
 ├── state.db            SQLite: события, ресурсы, таймеры
 ├── session/            Telegram-сессия (700)
-├── logs/  reports/  .updates/  .backup/
+├── logs/ reports/      локальный буфер (не синхронизируются, см. logs-push)
+├── run/                pid-файлы фоновых процессов
+├── .updates/  .backup/
 └── venv/               окружение с Telethon
 ```
 
@@ -265,7 +284,7 @@ bash ~/doomsday-bot/install.sh
 Всё сразу делает стартёр — обновление из GitHub + переустановка + сервисы:
 
 ```bash
-sh ~/doomsday-bot/start.sh
+doomsday start            # или: sh ~/doomsday-bot/start.sh
 ```
 
 Его же запускает Termux:Boot после перезагрузки телефона (раздел 3а),
@@ -281,6 +300,43 @@ bash install.sh                    # переустановка поверх: co
 
 Git-путь и zip-автообновление независимы: можно пользоваться любым (архив в
 Загрузках по-прежнему подхватывается автоматически раз в час).
+
+### Логи: буфер для передачи разработчику
+
+`~/doomsday-bot/logs/` и `~/doomsday-bot/reports/` **никогда не
+синхронизируются** с git (в .gitignore) — это локальный буфер устройства.
+Когда нужно передать логи ассистенту (диагностика, баг-репорт):
+
+```bash
+doomsday logs-push       # соберёт логи+отчёты+метаданные и запушит
+```
+
+Как это устроено:
+
+- бандл собирается во временный `~/doomsday-src/logsbuf/` (тоже не
+  синхронизируется) и уходит в **отдельную ветку `logs`** репозитория —
+  ветка `main` остаётся чистой, код с логами не смешивается;
+- после успешной отправки локальная копия бандла удаляется — буфер чист;
+- при ошибке сети бандл сохраняется на диске и попытку можно повторить;
+- в бандл входят: хвосты логов (по 2000 строк), последние 50 отчётов,
+  config.json (репозиторий PRIVATE — осознанно) и метаданные (версия,
+  коммит, платформа).
+
+Ассистент читает ветку `logs` и разбирает присланные данные.
+
+### git без пароля (нужен для start и logs-push)
+
+Чтобы `doomsday start` (git pull) и `doomsday logs-push` (git push) работали
+без интерактивного ввода пароля, один раз сохраните токен:
+
+```bash
+doomsday git-auth
+# спросит PAT со скрытым вводом; или: doomsday git-auth --token github_pat_...
+```
+
+Токен пишется в `~/.git-credentials` (права 600, только это устройство),
+git переключается на credential.helper store. Доступ к репозиторию
+проверяется сразу же.
 
 ### Чтобы ассистент сам публиковал обновления в ваш репозиторий
 
@@ -306,6 +362,22 @@ Git-путь и zip-автообновление независимы: можн�
 
 ## 13. История версий
 
+- **1.3.0** — ГОТОВЫЙ API ИГРЫ + стартёр + логи: (1) встроенный пресет Doomsday
+  Firebase callable — ребут через `rebootProduction` и полный скан состояния
+  через `initUser` без какой-либо настройки (протокол реверс-инженерен из
+  web-приложения: auth = сырой tgWebAppData, session = hash; свежая подпись
+  получается через Telethon на каждом проходе); (2) `doomsday start` / `stop` —
+  стартёр перенесён в python (git-обновление, переустановка при смене версии,
+  wake-lock, сервисы sv или фоновые процессы с pid-файлами, контрольный проход
+  cron; start.sh стал тонкой обёрткой); (3) `doomsday logs-push` — буфер логов:
+  logs/ и reports/ не синхронизируются, выгрузка по команде в отдельную ветку
+  `logs` (main не затрагивается), локальная копия чистится после отправки;
+  (4) `doomsday git-auth` — сохранение PAT для git без пароля; (5) discover
+  умеет находить Firebase-конфиг в JS и проверять рабочий эндпоинт (/syncTime)
+  с самофиксом tma.base_url; (6) панель/сводка показывают дедлайн цикла
+  производства (passiveFarm.endsAt); уведомление «требуется ребут» при
+  истечении цикла; (7) таблица ёмкостей складов игры (lib/game_data.py) для
+  точных процентов заполнения.
 - **1.2.1** — фикс доставки новых файлов через zip-обновления: в белый список
   обновлятора (CODE_ENTRIES) добавлены start.sh и .gitignore — раньше архив
   приносил код, но стартёр не появлялся в ~/doomsday-bot; start.sh теперь
