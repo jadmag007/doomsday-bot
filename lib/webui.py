@@ -32,9 +32,15 @@ log = logging.getLogger("doomsday.webui")
 MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8",
         ".png": "image/png", ".svg": "image/svg+xml", ".ico": "image/x-icon",
-        ".woff2": "font/woff2", ".webp": "image/webp"}
+        ".woff2": "font/woff2", ".woff": "font/woff", ".webp": "image/webp",
+        ".map": "application/json"}
 
 MAX_BODY = 512 * 1024
+
+# Версия кода РАБОТАЮЩЕГО процесса (фиксируется при импорте). Поле backend
+# в /api/overview позволяет отличить старый «висячий» процесс от свежего:
+# read_version() в рантайме читает файл с диска и всегда «новая».
+BACKEND_VERSION = paths.read_version()
 
 
 # ---------------- вспомогательное ----------------
@@ -156,6 +162,7 @@ def build_overview(cfg: dict) -> dict:
     }
     return {
         "version": paths.read_version(),
+        "backend": BACKEND_VERSION,
         "now": db.now_iso(),
         "timers": timers,
         "resources": resources,
@@ -291,16 +298,15 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/action":
             return self._action(cfg)
         if u.path == "/api/restart-web":
+            # отдельный процесс-перезапускатель: он остановит и НАС (этот
+            # обработчик), убьёт все висячие копии панели и поднимет её заново
             try:
-                subprocess.Popen(["sv", "restart", "doomsday-web"],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return self._send_json({"ok": True, "msg": "Сервис перезапускается…"})
-            except OSError:
-                try:
-                    subprocess.Popen(["pkill", "-f", "webui"])
-                    return self._send_json({"ok": True})
-                except OSError as e:
-                    return self._send_json({"ok": False, "msg": str(e)}, 500)
+                subprocess.Popen([paths.BIN_DOOMSDAY, "web-restart"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+                return self._send_json({"ok": True, "msg": "Перезапускаю панель…"})
+            except OSError as e:
+                return self._send_json({"ok": False, "msg": str(e)}, 500)
         return self._send_json({"error": "unknown endpoint"}, 404)
 
     do_PUT = do_POST

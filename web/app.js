@@ -101,6 +101,7 @@ async function refreshOverview() {
 let WARN_PCT = 90;
 function renderOverview(o) {
   $("hdr-version").textContent = "v" + o.version;
+  renderStaleBanner(o);
   const st = $("hdr-status");
   const running = o.running;
   if (running) {
@@ -140,9 +141,45 @@ function renderOverview(o) {
   }
 
   renderResourcesState(o);
+  renderTrackedDash(o);
   renderEvents($("events"), o.events.slice(0, 8));
   renderTimersState(T, o);
 }
+
+/* баннер устаревшего процесса панели: backend != версии кода на диске */
+function renderStaleBanner(o) {
+  const sb = $("stale-banner");
+  if (!sb) return;
+  const stale = o.version && (o.backend == null || o.backend !== o.version);
+  if (stale) {
+    $("stale-want").textContent = o.version;
+    $("stale-have").textContent = o.backend || "старая версия";
+    sb.classList.remove("hidden");
+  } else {
+    sb.classList.add("hidden");
+  }
+}
+
+async function pollReload(timeoutMs = 30000) {
+  const t0 = Date.now();
+  const iv = setInterval(async () => {
+    try {
+      const o = await api("/api/overview");
+      if (o.backend && o.backend === o.version) { clearInterval(iv); location.reload(); }
+    } catch (e) { /* панель ещё перезапускается */ }
+    if (Date.now() - t0 > timeoutMs) { clearInterval(iv); location.reload(); }
+  }, 1500);
+}
+
+$("stale-restart").addEventListener("click", async () => {
+  try {
+    await api("/api/restart-web", { method: "POST", body: {} });
+    toast("Перезапускаю панель — страница обновится сама…");
+    pollReload();
+  } catch (e) {
+    toast("Не вышло: " + e.message + " — выполните в Termux: doomsday start", true);
+  }
+});
 
 function pctOf(leftSec, totalSec) {
   if (leftSec == null || !totalSec) return "0%";
@@ -166,28 +203,82 @@ function renderEvents(el, events) {
 let RES_FILTER = [];
 let RES_CATALOG = null;
 
+/* общая строка ресурса — с иконкой игры */
+function resRow(r, opts = {}) {
+  const pct = r.pct != null ? Math.min(100, Math.max(0, r.pct)) : null;
+  const cls = pct == null ? "" : pct >= 100 ? "full" : pct >= WARN_PCT ? "warn" : "";
+  const stateBad = /переполн|full|ребут|перезагруз/i.test(r.state || "");
+  const ico = r.id
+    ? `<img class="res-ico" src="assets/items/${esc(r.id)}.webp" alt="" loading="lazy">`
+    : `<span class="res-ico res-ico-blank"></span>`;
+  return `<div class="res-row${opts.dim ? " dim" : ""}">
+    ${ico}
+    <div class="res-name" title="${esc(r.name)}">${esc(r.name)}</div>
+    <div class="res-bar"><div class="res-fill ${cls}" style="width:${pct == null ? 100 : pct}%; ${pct == null ? "opacity:.25" : ""}"></div></div>
+    <div class="res-vals">${fmtNum(r.current)}/${fmtNum(r.max)}${r.state ? ` <span class="res-state ${stateBad ? "bad" : ""}">${esc(r.state)}</span>` : ""}</div>
+  </div>`;
+}
+
 function renderResourcesState(o) {
   const box = $("resources");
   if (!box) return;
   const flt = new Set(o.resource_filter || RES_FILTER || []);
   const lastTs = (o.resources[0] || {}).ts;
   $("res-ts").textContent = lastTs ? `· ${fmtTs(lastTs)}` : "";
+  const tracked = o.resources.filter(r => r.id && flt.has(r.id));
+  const rest = o.resources.filter(r => !(r.id && flt.has(r.id)));
+
+  // верхняя карточка: только отслеживаемые
+  const tl = $("tracked-list");
+  if (tl) {
+    if (!flt.size) {
+      tl.innerHTML = `<div class="tracked-hint">Выбор не задан — уведомления приходят по <b>всем</b> ${o.resources.length || 40}+ ресурсам.
+        Отметьте нужные в блоке «Выбор ресурсов», чтобы получать пуш только по ним.</div>`;
+    } else if (!tracked.length) {
+      tl.innerHTML = `<div class="muted">Данных ещё нет — появится после первого скана.</div>`;
+    } else {
+      tl.innerHTML = tracked.map(r => resRow(r)).join("");
+    }
+    const tc = $("tracked-count");
+    if (tc) tc.textContent = flt.size ? `· ${flt.size}` : "";
+  }
+
+  // нижняя карточка: остальные (по умолчанию свёрнуты)
   if (!o.resources.length) {
     box.innerHTML = `<div class="muted">Нет данных. ${o.tma_configured ? "" : "Настройте TMA API (вкладка API / Discovery) — либо ждите уведомлений бота в чате."}</div>`;
     return;
   }
-  box.innerHTML = o.resources.map(r => {
-    const pct = r.pct != null ? Math.min(100, Math.max(0, r.pct)) : null;
-    const cls = pct == null ? "" : pct >= 100 ? "full" : pct >= WARN_PCT ? "warn" : "";
-    const stateBad = /переполн|full|ребут|перезагруз/i.test(r.state || "");
-    const off = flt.size && !(r.id && flt.has(r.id));
-    return `<div class="res-row">
-      <div class="res-name" title="${esc(r.name)}">${esc(r.name)}${off ? ' <span class="res-off" title="Не отслеживается — уведомлений нет">◦</span>' : ""}</div>
-      <div class="res-bar"><div class="res-fill ${cls}" style="width:${pct == null ? 100 : pct}%; ${pct == null ? "opacity:.25" : ""}"></div></div>
-      <div class="res-vals">${fmtNum(r.current)}/${fmtNum(r.max)}${r.state ? ` <span class="res-state ${stateBad ? "bad" : ""}">${esc(r.state)}</span>` : ""}</div>
-    </div>`;
-  }).join("");
+  const tb = $("res-toggle-rest");
+  if (tb) tb.textContent = `${box.classList.contains("collapsed") ? "Показать" : "Скрыть"} (${rest.length})`;
+  box.innerHTML = rest.map(r => resRow(r)).join("");
 }
+
+/* мини-список отслеживаемых на дашборде */
+function renderTrackedDash(o) {
+  const card = $("dash-tracked-card"), box = $("dash-tracked");
+  if (!card || !box) return;
+  const flt = new Set(o.resource_filter || RES_FILTER || []);
+  if (!flt.size) { card.classList.add("hidden"); return; }
+  card.classList.remove("hidden");
+  const tracked = (o.resources || []).filter(r => r.id && flt.has(r.id));
+  $("dash-tracked-count").textContent = `· ${flt.size}`;
+  box.innerHTML = tracked.length
+    ? tracked.map(r => resRow(r)).join("")
+    : `<div class="muted">Данных ещё нет — появится после первого скана.</div>`;
+}
+
+$("dash-to-res").addEventListener("click", () => openTab("res"));
+$("res-toggle-rest").addEventListener("click", () => {
+  const box = $("resources");
+  box.classList.toggle("collapsed");
+  $("res-toggle-rest").textContent =
+    `${box.classList.contains("collapsed") ? "Показать" : "Скрыть"}`;
+  if (OV) {
+    const flt = new Set(OV.resource_filter || RES_FILTER || []);
+    const rest = (OV.resources || []).filter(r => !(r.id && flt.has(r.id)));
+    $("res-toggle-rest").textContent += ` (${rest.length})`;
+  }
+});
 
 async function loadCatalog() {
   try {
@@ -204,10 +295,21 @@ function renderCatalog() {
   if (!box || !RES_CATALOG) return;
   const flt = new Set(RES_FILTER || []);
   box.innerHTML = RES_CATALOG.map(r =>
-    `<label class="check"><input type="checkbox" data-rid="${esc(r.id)}" ${flt.has(r.id) ? "checked" : ""}> ${esc(r.name)}</label>`).join("");
+    `<label class="check res-check" data-search="${esc((r.name + " " + r.id).toLowerCase())}">
+      <input type="checkbox" data-rid="${esc(r.id)}" ${flt.has(r.id) ? "checked" : ""}>
+      <img class="res-ico" src="assets/items/${esc(r.id)}.webp" alt="" loading="lazy">
+      <span class="res-check-name">${esc(r.name)}</span></label>`).join("");
   box.querySelectorAll("input[data-rid]").forEach(ch => ch.addEventListener("change", updateResCount));
   updateResCount();
 }
+
+/* поиск по каталогу — без перерисовки (чекбоксы сохраняют состояние) */
+$("res-search").addEventListener("input", () => {
+  const q = $("res-search").value.trim().toLowerCase();
+  document.querySelectorAll("#res-catalog .res-check").forEach(lb => {
+    lb.style.display = !q || lb.dataset.search.includes(q) ? "" : "none";
+  });
+});
 
 function updateResCount() {
   const el = $("res-filter-count");
@@ -638,8 +740,8 @@ $("save-api").addEventListener("click", async () => {
 $("restart-web").addEventListener("click", async () => {
   try {
     await api("/api/restart-web", { method: "POST", body: {} });
-    toast("Панель перезапускается — обновите страницу через пару секунд");
-    setTimeout(() => location.reload(), 3000);
+    toast("Панель перезапускается — страница обновится сама…");
+    pollReload();
   } catch (e) { toast(e.message, true); }
 });
 

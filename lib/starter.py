@@ -10,6 +10,7 @@
 start.sh остаётся тонкой обёрткой для Termux:Boot: exec bin/doomsday start.
 """
 import datetime
+import json
 import os
 import shutil
 import subprocess
@@ -171,8 +172,95 @@ def _kill_pid(name: str, needle: str) -> bool:
     return False
 
 
+def _pid_args(pid) -> list:
+    """Аргументы cmdline процесса (пусто — процесс недоступен)."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return []
+    return [a for a in raw.decode("utf-8", "replace").split("\0") if a]
+
+
+def _is_web_args(args: list) -> bool:
+    """Признаки процесса веб-панели в cmdline.
+
+    bin/doomsday web делает exec: python -m lib.worker web — поэтому ищем
+    «lib.worker» (или сам bin/doomsday) плюс точный аргумент "web"
+    (не web-restart, не пути вроде webui.py).
+    """
+    if "web" not in args:
+        return False
+    return ("lib.worker" in args
+            or any(a.endswith("/doomsday") or a == "doomsday" for a in args))
+
+
 def _web_running() -> bool:
-    return _pid_alive(_read_pid("web"), "doomsday")
+    """Жива ли панель, записанная в pid-файл (и это точно процесс панели)."""
+    pid = _read_pid("web")
+    if not pid or not str(pid).strip().isdigit():
+        return False
+    pid = int(pid)
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    args = _pid_args(pid)
+    return _is_web_args(args) if args else True
+
+
+def _web_pids(exclude_self: bool = True) -> list:
+    """PID всех процессов веб-панели, найденных по /proc.
+
+    Ловит и процессы вне нашего контроля: запущенные вручную в сессии
+    Termux, осиротевшие после обновления и т.п.
+    """
+    me = os.getpid()
+    out = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return out
+    for name in entries:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if exclude_self and pid == me:
+            continue
+        args = _pid_args(pid)
+        if args and _is_web_args(args):
+            out.append(pid)
+    return out
+
+
+def kill_web_all(force_after: float = 3.0) -> int:
+    """Остановить ВСЕ процессы веб-панели: sv-сервис, pid-файл, «висячие».
+
+    Возвращает число найденных процессов. Сначала sv down (чтобы runit не
+    поднимал сервис посреди чистки), затем TERM, при необходимости KILL.
+    """
+    if _sv:
+        try:
+            subprocess.run(["sv", "down", "doomsday-web"], capture_output=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    _kill_pid("web", "doomsday")
+    pids = _web_pids()
+    for pid in pids:
+        try:
+            os.kill(pid, 15)
+        except OSError:
+            pass
+    deadline = time.time() + force_after
+    while time.time() < deadline and _web_pids():
+        time.sleep(0.2)
+    for pid in _web_pids():
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+    time.sleep(0.3)
+    return len(pids)
 
 
 # ---------------- cron-строка ----------------
@@ -211,7 +299,63 @@ def cron_disable() -> None:
 
 # ---------------- службы ----------------
 
-def services_up(code_updated: bool) -> None:
+def _panel_backend_version(cfg: dict):
+    """Каким кодом работает процесс панели: (состояние, версия).
+
+    Состояния: ok — ответила JSON; pin — жива, но за PIN (версию не узнать);
+    down — не отвечает. Версия берётся из поля backend (фиксируется при старте
+    процесса), поэтому старый процесс честно показывает старую версию.
+    """
+    try:
+        with urllib.request.urlopen(panel_url(cfg) + "/api/overview", timeout=2) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError:
+        return "pin", None
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return "down", None
+    return "ok", str(data.get("backend") or "")
+
+
+def web_restart(cfg: dict, reason: str = "") -> bool:
+    """Полный перезапуск панели: убить все её процессы, поднять, дождаться ответа."""
+    n = kill_web_all()
+    if n:
+        _say(f"остановлено процессов панели: {n}")
+    time.sleep(0.4)
+    if _sv:
+        try:
+            subprocess.run(["sv", "up", "doomsday-web"], capture_output=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if not _web_running() and not _panel_alive(cfg, 1.5) and os.path.isfile(paths.BIN_DOOMSDAY):
+        try:
+            _spawn("web", [paths.BIN_DOOMSDAY, "web"], "web.log")
+        except OSError as e:
+            _warn(f"не удалось запустить панель: {e}")
+            return False
+    want = paths.read_version()
+    for _ in range(30):  # до 15 секунд
+        if _panel_alive(cfg):
+            state, ver = _panel_backend_version(cfg)
+            if state == "ok" and ver == want:
+                _ok("веб-панель перезапущена и работает на актуальном коде")
+                db.event("web", "Веб-панель перезапущена",
+                         reason or f"код процесса приведён к v{want}")
+                return True
+        time.sleep(0.5)
+    _warn("панель не поднялась после перезапуска — посмотрите logs/web.log")
+    return False
+
+
+def cmd_web_restart(args) -> int:
+    """CLI: перезапустить веб-панель (используется и кнопкой из панели)."""
+    cfg = cfgmod.load()
+    ok = web_restart(cfg, "запрос из веб-панели" if args and getattr(args, "from_web", False)
+                     else "команда doomsday web-restart")
+    return 0 if ok else 1
+
+
+def services_up(code_updated: bool, cfg: dict = None) -> None:
     # wake-lock: не даём Android усыпить Termux
     wl = shutil.which("termux-wake-lock")
     if wl:
@@ -221,10 +365,15 @@ def services_up(code_updated: bool) -> None:
         except (OSError, subprocess.TimeoutExpired):
             pass
 
+    if code_updated:
+        # код обновился: убиваем ВСЕ процессы панели, включая запущенные
+        # вручную — иначе старый процесс держит порт и раздаёт устаревший API
+        kill_web_all()
+
     if _sv:
         try:
             up = subprocess.run(["sv", "up", "doomsday-web"], capture_output=True, timeout=30)
-            if up.returncode != 0 or code_updated:
+            if up.returncode != 0:
                 subprocess.run(["sv", "restart", "doomsday-web"], capture_output=True, timeout=30)
             subprocess.run(["sv", "up", "cronie"], capture_output=True, timeout=30)
             _ok("сервисы подняты (doomsday-web, cronie)")
@@ -233,13 +382,57 @@ def services_up(code_updated: bool) -> None:
     else:
         if code_updated:
             _kill_pid("web", "doomsday")
-        if _web_running():
+        # жива ли панель: по pid-файлу ИЛИ просто по ответу (могла быть
+        # запущена вручную/через sv — pid-файла нет, а порт занят)
+        panel_ok = _web_running() or (cfg is not None and _panel_alive(cfg))
+        if panel_ok:
             _ok("веб-панель уже работает (фон)")
         elif os.path.isfile(paths.BIN_DOOMSDAY):
-            _spawn("web", [paths.BIN_DOOMSDAY, "web"], "web.log")
-            _ok("веб-панель запущена в фоне (termux-services не найден)")
+            try:
+                _spawn("web", [paths.BIN_DOOMSDAY, "web"], "web.log")
+                _ok("веб-панель запущена в фоне (termux-services не найден)")
+            except OSError as e:
+                _warn(f"не удалось запустить панель: {e}")
         else:
             _warn(f"нет {paths.BIN_DOOMSDAY} — веб-панель не запущена")
+
+    # панель обязана работать на актуальном коде (лечение «висячих» процессов:
+    # старый раздает устаревший API — пустой каталог ресурсов, дубли имён)
+    if cfg is not None:
+        state, ver = _panel_backend_version(cfg)
+        want = paths.read_version()
+        if state == "ok" and ver != want:
+            _warn(f"панель работает на старом коде ({ver or 'до v2.2'}) — перезапускаю…")
+            web_restart(cfg, f"процесс панели {ver or 'старый'} → v{want}")
+        elif state == "down":
+            _ensure_panel(cfg)
+
+
+def _kill_worker_cmd(arg_name: str) -> int:
+    """Остановить фоновые процессы `doomsday <arg_name>` (web/cron) по /proc."""
+    me = os.getpid()
+    killed = 0
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return 0
+    for name in entries:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if pid == me:
+            continue
+        args = _pid_args(pid)
+        if not args or arg_name not in args:
+            continue
+        if not ("lib.worker" in args or any(a.endswith("/doomsday") or a == "doomsday" for a in args)):
+            continue
+        try:
+            os.kill(pid, 15)
+            killed += 1
+        except OSError:
+            pass
+    return killed
 
 
 def services_down() -> None:
@@ -249,8 +442,13 @@ def services_down() -> None:
             _ok("сервис doomsday-web остановлен (sv down)")
         except (OSError, subprocess.TimeoutExpired):
             pass
-    if _kill_pid("web", "doomsday"):
-        _ok("фоновая веб-панель остановлена")
+    if _kill_worker_cmd("web"):
+        _ok("веб-панель остановлена")
+    try:
+        os.unlink(_pidfile("web"))
+    except OSError:
+        pass
+    _kill_worker_cmd("cron")
     _kill_pid("cron", "doomsday")
 
 
@@ -331,7 +529,7 @@ def cmd_start(args) -> int:
     print(f"Исходники: {SRC_DIR}\n")
 
     code_updated = update_from_git()
-    services_up(code_updated)
+    services_up(code_updated, cfg)
     cron_ensure()
 
     # контрольный проход: догоняем пропущенное (действия решат сами, пора ли)

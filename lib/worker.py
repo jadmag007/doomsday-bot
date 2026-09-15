@@ -416,6 +416,11 @@ def cmd_panel(args) -> int:
     return starter.cmd_panel(args)
 
 
+def cmd_web_restart(args) -> int:
+    from . import starter
+    return starter.cmd_web_restart(args)
+
+
 # ---------------- selftest ----------------
 
 def cmd_selftest(args) -> int:
@@ -520,6 +525,18 @@ def cmd_selftest(args) -> int:
     check("каталог ресурсов полный",
           lambda: (len(cat) >= 54 and all(c.get("id") and c.get("name") for c in cat), str(len(cat))))
 
+    print("selftest: графические ассеты игры (иконки/шрифты)")
+    import os as _os
+    web_items = _os.path.join(paths.WEB_DIR, "assets", "items")
+    missing_icons = [c["id"] for c in cat
+                     if not _os.path.isfile(_os.path.join(web_items, c["id"] + ".webp"))]
+    check("иконка есть для каждого ресурса",
+          lambda: (not missing_icons, "нет: " + ", ".join(missing_icons[:6]) if missing_icons else ""))
+    web_fonts = _os.path.join(paths.WEB_DIR, "assets", "fonts")
+    fonts_ok = all(_os.path.isfile(_os.path.join(web_fonts, f))
+                   for f in ("europe-normal.woff", "europe-bold.woff", "Iosevka-Regular.woff2"))
+    check("шрифты Europe/Iosevka на месте", lambda: (fonts_ok, ""))
+
     print("selftest: чистка legacy-конфига")
     legacy = {"updater": {"enabled": True}, "schedules": {"update_check_minutes": 30},
               "notify": {"events": {"update_applied": True}}}
@@ -622,6 +639,7 @@ def main(argv=None) -> int:
     lg = sub.add_parser("log", help="хвост лога")
     lg.add_argument("-n", "--lines", type=int, default=50)
     sub.add_parser("web", help="запустить веб-панель (обычно — сервисом)")
+    sub.add_parser("web-restart", help="перезапустить веб-панель (убить все её процессы и поднять)")
     sub.add_parser("panel", help="открыть веб-панель в браузере")
     sub.add_parser("selftest", help="самопроверка без Telegram")
     sub.add_parser("start", help="стартёр: обновить из git и запустить всё")
@@ -639,7 +657,8 @@ def main(argv=None) -> int:
     no_lock = {"web": cmd_web, "panel": cmd_panel, "selftest": cmd_selftest, "setup": cmd_setup,
                "status": cmd_status, "log": cmd_log, "test-notify": cmd_test_notify,
                "start": cmd_start, "stop": cmd_stop, "logs-push": cmd_logs_push,
-               "logspush": cmd_logs_push, "git-auth": cmd_git_auth}
+               "logspush": cmd_logs_push, "git-auth": cmd_git_auth,
+               "web-restart": cmd_web_restart}
     if args.cmd in no_lock:
         return no_lock[args.cmd](args)
 

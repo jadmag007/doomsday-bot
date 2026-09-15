@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <title>Doomsday Tyranny Bot</title>
+<link rel="icon" href="assets/favicon.ico" type="image/x-icon">
+<link rel="apple-touch-icon" href="assets/logo.webp">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -21,7 +23,7 @@
 
 <header class="topbar">
   <div class="brand">
-    <span class="brand-mark">☢</span>
+    <img class="brand-logo" src="assets/logo.webp" alt="☢">
     <div>
       <div class="brand-name">Doomsday Tyranny Bot</div>
       <div class="brand-sub"><span id="hdr-version">v?</span> · <span id="hdr-clock">--:--:--</span></div>
@@ -29,6 +31,17 @@
   </div>
   <div id="hdr-status" class="hdr-status">…</div>
 </header>
+
+<!-- баннер: процесс панели старше кода на диске (лечится перезапуском) -->
+<div id="stale-banner" class="stale-banner hidden">
+  <div class="stale-text">⚠ Код обновлён до <b>v<span id="stale-want">?</span></b>, но панель всё ещё
+    работает старым процессом (<b id="stale-have">?</b>) — каталог ресурсов и другие
+    функции могут не работать. Перезапустите её.</div>
+  <div class="stale-actions">
+    <button id="stale-restart" class="btn primary small">⟳ Перезапустить панель</button>
+    <span class="stale-hint">или в Termux: <code>doomsday start</code></span>
+  </div>
+</div>
 
 <nav class="tabs" id="tabs">
   <button data-tab="dash" class="tab active">Дашборд</button>
@@ -56,6 +69,14 @@
       <div class="card-sub" id="t-scan-sub">нет данных</div>
       <div class="progress"><div class="progress-bar green" id="t-scan-bar" style="width:0%"></div></div>
     </div>
+  </div>
+
+  <div class="card" id="dash-tracked-card">
+    <div class="card-head">
+      <div class="card-label">Ресурсы под контролем <span id="dash-tracked-count" class="muted"></span></div>
+      <button id="dash-to-res" class="btn small">Настроить →</button>
+    </div>
+    <div id="dash-tracked" class="resources"></div>
   </div>
 
   <div class="card">
@@ -103,15 +124,24 @@
 
 <!-- ===== РЕСУРСЫ ===== -->
 <section id="tab-res" class="tab-page">
+  <div class="card tracked-card">
+    <div class="card-head">
+      <div class="card-label">Под контролем <span id="tracked-count" class="muted"></span></div>
+      <button class="btn small" data-action="scan">Скан сейчас</button>
+    </div>
+    <div id="tracked-list" class="resources"></div>
+  </div>
+
   <div class="card">
     <div class="card-head">
-      <div class="card-label">Отслеживаемые ресурсы <span id="res-filter-count" class="muted"></span></div>
+      <div class="card-label">Выбор ресурсов <span id="res-filter-count" class="muted"></span></div>
       <div class="res-tools">
-        <button id="res-select-all" class="btn small">Выбрать все</button>
-        <button id="res-select-none" class="btn small">Снять выбор</button>
+        <button id="res-select-all" class="btn small">Все</button>
+        <button id="res-select-none" class="btn small">Снять</button>
       </div>
     </div>
-    <div class="card-sub">Отметьте ресурсы, по которым присылать push-уведомления (переполнение склада, порог заполнения). Ничего не выбрано — уведомления приходят по всем ресурсам.</div>
+    <div class="card-sub">Уведомления (переполнение склада, порог заполнения) приходят только по отмеченным ресурсам. Ничего не выбрано — по всем.</div>
+    <input id="res-search" type="text" placeholder="🔍 Поиск ресурса…" autocomplete="off">
     <div id="res-catalog" class="checks-grid"></div>
     <div class="res-save-row">
       <button id="save-res-filter" class="btn primary">Сохранить выбор</button>
@@ -121,12 +151,11 @@
 
   <div class="card">
     <div class="card-head">
-      <div class="card-label">Состояние складов <span id="res-ts" class="muted"></span></div>
-      <button class="btn small" data-action="scan">Скан сейчас</button>
+      <div class="card-label">Остальные склады <span id="res-ts" class="muted"></span></div>
+      <button id="res-toggle-rest" class="btn small">Показать</button>
     </div>
-    <div id="resources" class="resources">
-      <div class="muted">Данные появятся после первого скана (TMA API должен быть настроен) либо из уведомлений бота.</div>
-    </div>
+    <div class="card-sub">Не отслеживаются — уведомлений по ним нет. Большая часть обычно «навалом» и не требует внимания.</div>
+    <div id="resources" class="resources collapsed"></div>
   </div>
 </section>
 
