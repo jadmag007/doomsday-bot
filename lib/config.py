@@ -56,6 +56,7 @@ DEFAULTS = {
             "resource_full": True,
             "reboot_report": True,
             "scan_report": False,
+            "exchange_report": True,
             "errors": True,
             "daily_summary": True,
             "chat_alerts": True,
@@ -67,6 +68,20 @@ DEFAULTS = {
         "host": "127.0.0.1",
         "port": 8080,
         "pin": "",
+        "open_on_start": True,  # doomsday start открывает панель в браузере
+    },
+    "exchange": {
+        "enabled": True,
+        "rules": [
+            # rid, mode:
+            #   "cap"    — обменивать при заполнении склада (threshold_pct)
+            #   "always" — продавать всё сразу (как только >= min)
+            # keep — сколько единиц оставлять на складе (0 = продавать всё)
+            {"rid": "floppy", "mode": "cap", "threshold_pct": 90, "keep": 0, "min": 1, "enabled": True},
+            {"rid": "hdd", "mode": "cap", "threshold_pct": 90, "keep": 0, "min": 1, "enabled": True},
+            {"rid": "cassete", "mode": "cap", "threshold_pct": 90, "keep": 0, "min": 1, "enabled": True},
+            {"rid": "uran_pills", "mode": "always", "threshold_pct": 90, "keep": 0, "min": 1, "enabled": True},
+        ],
     },
 }
 
@@ -186,6 +201,33 @@ def validate(cfg: dict) -> list:
             if not isinstance(step, dict) or "url" not in step:
                 errs.append(f"tma.{key}[{i}]: нет поля url")
                 break
+    # правила автообмена
+    ex = cfg.get("exchange") or {}
+    if not isinstance(ex.get("rules", []), list):
+        errs.append("exchange.rules: должен быть списком правил")
+    else:
+        from . import game_data
+        seen_rids = set()
+        for i, rule in enumerate(ex.get("rules") or []):
+            if not isinstance(rule, dict):
+                errs.append(f"exchange.rules[{i}]: должен быть объектом")
+                continue
+            rid = str(rule.get("rid") or "")
+            if rid not in game_data.SELL_INFO:
+                errs.append(f"exchange.rules[{i}]: ресурс {rid!r} не продаётся в игре")
+                continue
+            if rid in seen_rids:
+                errs.append(f"exchange.rules[{i}]: правило для {rid!r} уже есть")
+            seen_rids.add(rid)
+            if str(rule.get("mode")) not in ("cap", "always"):
+                errs.append(f"exchange.rules[{i}].mode: 'cap' или 'always'")
+            for num_key, lo, hi in (("threshold_pct", 10, 100), ("keep", 0, 10**9), ("min", 0, 10**9)):
+                try:
+                    v = float(rule.get(num_key) or 0)
+                    if not (lo <= v <= hi):
+                        raise ValueError
+                except (TypeError, ValueError):
+                    errs.append(f"exchange.rules[{i}].{num_key}: число от {lo} до {hi}")
     return errs
 
 

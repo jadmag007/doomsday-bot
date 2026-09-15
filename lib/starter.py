@@ -522,6 +522,38 @@ def cmd_panel(args) -> int:
     return 0
 
 
+def _open_panel_in_browser(cfg: dict) -> None:
+    """Открыть веб-панель в браузере телефона (молча, если не Termux)."""
+    opener = shutil.which("termux-open-url")
+    if not opener:
+        return
+    try:
+        subprocess.run([opener, panel_url(cfg)], capture_output=True, timeout=15)
+        _ok("веб-панель открыта в браузере")
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _reexec_after_update() -> None:
+    """Перезапустить стартёр на СВЕЖЕМ коде сразу после переустановки.
+
+    Пока процесс не перезапущен, в памяти работает СТАРЫЙ код: версии до v2.2
+    не умели добивать «висячие» процессы панели — отсюда эффект «start дважды»
+    и красный баннер после первого запуска. os.execve подменяет процесс целиком;
+    от зацикливания страхует переменная окружения DOOMSDAY_START_RESUMED.
+    """
+    if os.environ.get("DOOMSDAY_START_RESUMED") == "1":
+        return
+    if not (os.path.isfile(paths.BIN_DOOMSDAY) and os.access(paths.BIN_DOOMSDAY, os.X_OK)):
+        return
+    _ok("перезапускаю стартёр на новом коде…")
+    try:
+        os.execve(paths.BIN_DOOMSDAY, [paths.BIN_DOOMSDAY, "start"],
+                  {**os.environ, "DOOMSDAY_START_RESUMED": "1"})
+    except OSError as e:
+        _warn(f"не удалось перезапуститься на новом коде ({e}) — продолжаю текущим")
+
+
 def cmd_start(args) -> int:
     cfg = cfgmod.load()
     print(f"Doomsday Tyranny Bot v{paths.read_version()} — стартёр")
@@ -529,6 +561,10 @@ def cmd_start(args) -> int:
     print(f"Исходники: {SRC_DIR}\n")
 
     code_updated = update_from_git()
+    if code_updated:
+        # ВАЖНО: сейчас в памяти всё ещё СТАРЫЙ код — перезапускаемся на свежем,
+        # чтобы убийство висячих процессов панели срабатывало уже этим запуском
+        _reexec_after_update()
     services_up(code_updated, cfg)
     cron_ensure()
 
@@ -542,7 +578,12 @@ def cmd_start(args) -> int:
 
     print()
     _ok(f"doomsday-bot работает. Веб-панель: {panel_url(cfg)}")
-    _say("открыть панель: doomsday panel  (или браузер → указанный адрес)")
+    # одна команда = всё сделано: панель поднята выше, здесь открываем браузер
+    if cfg.get("web", {}).get("open_on_start", True):
+        _open_panel_in_browser(cfg)
+        _say("если браузер не открылся — выполните: doomsday panel")
+    else:
+        _say("открыть панель: doomsday panel  (или браузер → указанный адрес)")
     _say("логи: ~/doomsday-bot/logs (не синхронизируются)")
     _say("передать логи разработчику: doomsday logs-push")
     db.event("start", "Стартёр выполнен",

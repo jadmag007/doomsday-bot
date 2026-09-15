@@ -109,11 +109,37 @@ FIREBASE_PRESET = {
                 "game_state": "result",
                 "farm_ends_at": "result.passiveFarm.endsAt",
                 "is_premium": "result.isPremium",
+                "balance_coin": "result.gameStats.coin",
+                "balance_mcoin": "result.gameStats.mCoin",
             },
             "save": "state_raw",
         },
     ],
 }
+
+
+def exchange_steps(resource_id: str, amount) -> list:
+    """Шаги продажи ресурса — callable sellItem (те же кнопки «Продать»/«Установить»
+    во вкладке ресурса в игре). amount подставляется литералом с сохранением типа
+    (число), auth/session — шаблонами из контекста.
+
+    Ответ: {"result": {"mCoin": …, "coin": …, "resourceCount": …}} — новые балансы
+    DDT/данных и остаток ресурса на складе.
+    """
+    return [
+        {
+            "name": f"sellItem:{resource_id}",
+            "method": "POST",
+            "url": "{{base_url}}/sellItem",
+            "headers": {"Content-Type": "application/json"},
+            "body": {"data": {"resourceId": str(resource_id), "amount": amount,
+                              "auth": "{{init_data}}", "session": "{{session_hash}}"}},
+            "expect_status": [200],
+            "extract": {"sell_mcoin": "result.mCoin", "sell_coin": "result.coin",
+                        "sell_left": "result.resourceCount"},
+            "save": "sell_raw",
+        },
+    ]
 
 
 def get_base_url(cfg: dict) -> str:

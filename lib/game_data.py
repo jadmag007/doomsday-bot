@@ -159,6 +159,65 @@ def catalog() -> list:
     out = [{"id": rid, "name": ru_name(rid)} for rid in ids]
     return sorted(out, key=lambda x: x["name"].lower())
 
+# Продажа/обмен ресурсов (реверс-инжиниринг кнопок «Продать»/«Установить»
+# во вкладке ресурса игры; JS-бандл v0.9.0.04, поле sellPrice/isDDTSell).
+# Обе кнопки вызывают один и тот же callable Firebase: sellItem(resourceId, amount).
+#   is_ddt=False → выручка в «Данных для серверов» (gameStats.coin, БАЙТЫ:
+#     дискета 524288 б = 512 КиБ, ЖД 12582912 б = 12 МиБ, кассета 6144 б = 6 КиБ);
+#   is_ddt=True  → выручка в DDT (gameStats.mCoin, премиум-валюта).
+SELL_INFO = {
+    "cassete":    {"price": 6144,     "is_ddt": False},
+    "floppy":     {"price": 524288,   "is_ddt": False},
+    "hdd":        {"price": 12582912, "is_ddt": False},
+    "u235":       {"price": 2,        "is_ddt": True},
+    "uran_pills": {"price": 1,        "is_ddt": True},
+    "ddt_res":    {"price": 1,        "is_ddt": True},
+}
+
+# Русские подписи валют для панели и уведомлений.
+CURRENCY_RU = {
+    "data": "данные для серверов",
+    "ddt": "DDT",
+}
+
+
+def sell_unit(rid: str):
+    """(цена за единицу, is_ddt) для продаваемого ресурса; None — не продаётся."""
+    info = SELL_INFO.get(rid)
+    return (info["price"], info["is_ddt"]) if info else None
+
+
+def fmt_bytes(v) -> str:
+    """Байты → человекочитаемое (КиБ/МиБ/ГиБ), как в игре («Data for servers», ГБ)."""
+    if v is None:
+        return "?"
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    for unit in ("Б", "КиБ", "МиБ", "ГиБ", "ТиБ"):
+        if abs(v) < 1024 or unit == "ТиБ":
+            if unit == "Б":
+                return f"{v:,.0f}".replace(",", " ") + " Б"
+            return f"{v:,.2f}".replace(",", " ").rstrip("0").rstrip(".") + " " + unit
+        v /= 1024
+    return f"{v} Б"
+
+
+def sellable_catalog() -> list:
+    """Продающиеся ресурсы для панели: [{id, name, price, is_ddt, unit_ru}] по-русски."""
+    out = []
+    for rid, info in SELL_INFO.items():
+        out.append({
+            "id": rid,
+            "name": ru_name(rid, rid),
+            "price": info["price"],
+            "is_ddt": info["is_ddt"],
+            "unit_ru": (f"{info['price']} DDT" if info["is_ddt"] else fmt_bytes(info["price"])),
+        })
+    return out
+
+
 CAPACITIES = {
     "alloy1": [1200, 12000, 23000, 34000, 45000, 56000, 67000, 78000, 89000, 100000, 111000, 122000, 133000, 144000, 155000, 166000, 177000, 188000, 199000, 210000, 221000, 232000, 243000, 254000, 265000, 276000, 287000, 298000, 309000, 320000, 331000, 342000, 353000, 364000, 375000, 386000, 397000, 408000, 419000, 430000],
     "aluminum": [1080, 69000, 137000, 205000, 273000, 341000, 409000, 477000, 545000, 613000, 681000, 749000, 817000, 885000, 953000, 1021000, 1089000, 1157000, 1225000, 1293000, 1361000, 1429000, 1497000, 1565000, 1633000, 1701000, 1769000, 1837000, 1905000, 1973000, 2041000, 2109000, 2177000, 2245000, 2313000, 2381000, 2449000, 2517000, 2585000, 2653000],

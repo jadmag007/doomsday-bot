@@ -142,6 +142,7 @@ function renderOverview(o) {
 
   renderResourcesState(o);
   renderTrackedDash(o);
+  renderExchange(o);
   renderEvents($("events"), o.events.slice(0, 8));
   renderTimersState(T, o);
 }
@@ -266,6 +267,134 @@ function renderTrackedDash(o) {
     ? tracked.map(r => resRow(r)).join("")
     : `<div class="muted">Данных ещё нет — появится после первого скана.</div>`;
 }
+
+/* ================= автообмен / продажа ================= */
+let EX_DIRTY = false;  // есть несохранённые правки правил — не перерисовывать их
+
+document.addEventListener("change", e => {
+  if (e.target.closest("#ex-rules") || e.target.id === "f-ex-enabled") EX_DIRTY = true;
+});
+document.addEventListener("input", e => {
+  if (e.target.closest("#ex-rules")) EX_DIRTY = true;
+});
+
+function fmtBytesRu(v) {
+  if (v == null || !isFinite(v)) return "?";
+  const units = ["Б", "КиБ", "МиБ", "ГиБ", "ТиБ"];
+  let f = Number(v), i = 0;
+  while (Math.abs(f) >= 1024 && i < units.length - 1) { f /= 1024; i++; }
+  return (i === 0 ? Math.round(f).toLocaleString("ru-RU")
+    : (Math.round(f * 100) / 100).toLocaleString("ru-RU")) + " " + units[i];
+}
+
+function fmtProceeds(s, count) {
+  const total = Number(count) * s.price;
+  if (!isFinite(total)) return "—";
+  if (s.is_ddt) return "→ +" + (Math.round(total * 100) / 100).toLocaleString("ru-RU") + " DDT";
+  return "→ +" + fmtBytesRu(total);
+}
+
+function renderExchange(o) {
+  const ex = o.exchange;
+  if (!ex) return;
+  const stateEl = $("ex-state");
+  if (stateEl) stateEl.textContent = ex.enabled ? "· вкл" : "· выключен";
+  const b = ex.balances || {};
+  const balEl = $("ex-balances");
+  if (balEl) balEl.innerHTML = `
+    <div class="ex-bal"><span>Данные для серверов</span><b>${esc(b.coin_ru || "нет данных")}</b></div>
+    <div class="ex-bal"><span>DDT (премиум)</span><b>${esc(b.mcoin_ru || "нет данных")}</b></div>`;
+  const en = $("f-ex-enabled");
+  if (en) en.checked = !!ex.enabled;
+  renderExRules(ex, o);
+  renderExLast(ex.last || []);
+}
+
+function renderExRules(ex, o) {
+  const box = $("ex-rules");
+  if (!box) return;
+  if (EX_DIRTY && box.children.length) return;  // не сносить правки пользователя
+  const rules = {};
+  (ex.rules || []).forEach(r => { rules[r.rid] = r; });
+  const byRid = {};
+  ((o && o.resources) || []).forEach(r => { if (r.id) byRid[r.id] = r; });
+  box.innerHTML = (ex.sellable || []).map(s => {
+    const rule = rules[s.id] || {};
+    const mode = rule.mode || "off";
+    const res = byRid[s.id];
+    const store = res
+      ? `${fmtNum(res.current)} / ${fmtNum(res.max)}${res.pct != null ? " (" + Math.round(res.pct) + "%)" : ""}`
+      : "нет данных склада";
+    return `<div class="ex-rule${mode === "off" ? " off" : ""}" data-rid="${esc(s.id)}">
+      <img class="res-ico" src="assets/items/${esc(s.id)}.webp" alt="" loading="lazy">
+      <div class="ex-rule-main">
+        <div class="ex-rule-name">${esc(s.name)}</div>
+        <div class="muted">${esc(store)} · ×1 = ${esc(s.unit_ru)}</div>
+      </div>
+      <div class="ex-rule-ctrl">
+        <select data-ex="mode" class="select">
+          <option value="off" ${mode === "off" ? "selected" : ""}>Не менять</option>
+          <option value="cap" ${mode === "cap" ? "selected" : ""}>При заполнении</option>
+          <option value="always" ${mode === "always" ? "selected" : ""}>Сразу</option>
+        </select>
+        <input data-ex="threshold" type="number" min="10" max="100" step="5"
+               value="${rule.threshold_pct ?? 90}" title="Порог заполнения, %">
+        <input data-ex="keep" type="number" min="0" step="1"
+               value="${rule.keep ?? 0}" title="Оставить на складе" placeholder="оставить">
+      </div>
+      <div class="ex-rule-proc muted">${res ? fmtProceeds(s, res.current) : "—"}</div>
+    </div>`;
+  }).join("");
+  box.querySelectorAll("[data-ex='mode']").forEach(sel =>
+    sel.addEventListener("change", () => updateExRow(sel.closest(".ex-rule"))));
+  box.querySelectorAll(".ex-rule").forEach(updateExRow);
+}
+
+function updateExRow(row) {
+  const mode = row.querySelector("[data-ex='mode']").value;
+  row.querySelector("[data-ex='threshold']").style.display = mode === "cap" ? "" : "none";
+  row.querySelector("[data-ex='keep']").style.display = mode === "off" ? "none" : "";
+  row.classList.toggle("off", mode === "off");
+}
+
+function renderExLast(items) {
+  const el = $("ex-last");
+  if (!el) return;
+  if (!items.length) {
+    el.innerHTML = `<div class="muted">Обменов ещё не было.</div>`;
+    return;
+  }
+  el.innerHTML = items.map(e => `
+    <div class="ev info">
+      <div class="ev-time">${fmtTs(e.ts)}</div>
+      <div><div class="ev-title">${esc(e.title)}</div>
+      ${e.body ? `<div class="ev-body">${esc(String(e.body).slice(0, 220))}</div>` : ""}</div>
+    </div>`).join("");
+}
+
+$("save-exchange").addEventListener("click", async () => {
+  try {
+    const c = await api("/api/config");
+    const rules = [];
+    document.querySelectorAll("#ex-rules .ex-rule").forEach(row => {
+      const mode = row.querySelector("[data-ex='mode']").value;
+      if (mode === "off") return;
+      rules.push({
+        rid: row.dataset.rid,
+        mode,
+        threshold_pct: num(row.querySelector("[data-ex='threshold']").value, 90, 10, 100),
+        keep: num(row.querySelector("[data-ex='keep']").value, 0, 0, 1e9),
+        min: 1,
+        enabled: true,
+      });
+    });
+    c.exchange = { ...(c.exchange || {}), enabled: $("f-ex-enabled").checked, rules };
+    await api("/api/config", { method: "PUT", body: c });
+    EX_DIRTY = false;
+    setMsg("ex-msg", "Сохранено ✔ — обмен при следующем скане");
+    refreshOverview();
+  } catch (e) { setMsg("ex-msg", e.message, true); }
+});
 
 $("dash-to-res").addEventListener("click", () => openTab("res"));
 $("res-toggle-rest").addEventListener("click", () => {
@@ -460,6 +589,7 @@ const NOTIFY_EVENTS = [
   ["resource_warn", "Ресурс близок к максимуму"],
   ["reboot_report", "Отчёт о ребуте"],
   ["reboot_needed", "Цикл истёк — нужен ребут"],
+  ["exchange_report", "Отчёты автообмена"],
   ["chat_alerts", "Уведомления бота в чате"],
   ["errors", "Ошибки"],
   ["daily_summary", "Сводка дня"],

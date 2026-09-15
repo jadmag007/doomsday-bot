@@ -84,6 +84,7 @@
     <div class="actions-row">
       <button class="btn primary" data-action="reboot">⟳ Ребут производства</button>
       <button class="btn" data-action="scan">🔍 Скан сейчас</button>
+      <button class="btn" data-action="exchange">⇄ Обмен сейчас</button>
       <button class="btn" data-action="test-notify">🔔 Тест уведомления</button>
       <button class="btn" data-action="check">✓ Диагностика</button>
     </div>
@@ -130,6 +131,28 @@
       <button class="btn small" data-action="scan">Скан сейчас</button>
     </div>
     <div id="tracked-list" class="resources"></div>
+  </div>
+
+  <div class="card" id="exchange-card">
+    <div class="card-head">
+      <div class="card-label">Автообмен <span id="ex-state" class="muted"></span></div>
+      <div class="res-tools">
+        <button class="btn small" data-action="exchange">Обменять сейчас</button>
+      </div>
+    </div>
+    <div id="ex-balances" class="ex-balances"></div>
+    <div class="card-sub">Обмен выполняется при каждом скане — те же кнопки, что в игре
+      («Установить» → данные для серверов, «Продать» → DDT). «При заполнении» — продать,
+      когда склад достигнет порога; «Сразу» — продавать всё по мере производства;
+      «оставить» — запас, который не продаётся никогда.</div>
+    <div id="ex-rules" class="ex-rules"></div>
+    <div class="res-save-row">
+      <label class="check"><input type="checkbox" id="f-ex-enabled" checked> Автообмен включён</label>
+      <button id="save-exchange" class="btn primary">Сохранить правила</button>
+      <span id="ex-msg" class="save-msg"></span>
+    </div>
+    <div class="card-sub">Последние обмены:</div>
+    <div id="ex-last" class="ex-last"></div>
   </div>
 
   <div class="card">

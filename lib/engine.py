@@ -184,7 +184,151 @@ def _fmt_ms_deadline(ends_at_ms) -> str:
     return _dt.datetime.fromtimestamp(ends_at_ms / 1000).strftime("%d.%m %H:%M")
 
 
-# ---------------- действия ----------------
+# ---------------- автообмен (sellItem) ----------------
+
+def _exchange_plan(cfg: dict, resources: list) -> list:
+    """Решить, что продавать: [(rid, amount, rule)]. Чистая функция, без API.
+
+    Режимы (exchange.rules):
+      cap    — продавать, когда склад заполнен на threshold_pct % и больше;
+      always — продавать всё сразу, как только количество >= min.
+    keep — сколько единиц оставить на складе (0 = продавать всё, как кнопка в игре).
+    """
+    ex = cfg.get("exchange") or {}
+    if not ex.get("enabled", True):
+        return []
+    from . import game_data
+    by_rid = {}
+    for r in resources or []:
+        rid = r.get("id") or game_data.rid_by_name(r.get("name"))
+        if rid:
+            by_rid[rid] = r
+    plan = []
+    for rule in ex.get("rules") or []:
+        if not isinstance(rule, dict) or not rule.get("enabled", True):
+            continue
+        rid = str(rule.get("rid") or "")
+        if rid not in game_data.SELL_INFO or rid not in by_rid:
+            continue
+        r = by_rid[rid]
+        count = r.get("current")
+        if count is None:
+            continue
+        try:
+            keep = max(0.0, float(rule.get("keep") or 0))
+            min_amt = max(0.0, float(rule.get("min") or 0))
+            threshold = float(rule.get("threshold_pct") or 90)
+        except (TypeError, ValueError):
+            continue
+        mode = str(rule.get("mode") or "cap")
+        if mode not in ("cap", "always"):
+            continue
+        if mode == "cap":
+            pct = r.get("pct")
+            if pct is None and r.get("max"):
+                pct = count / r["max"] * 100
+            if pct is None or pct < threshold:
+                continue
+        amount = round(count - keep, 3)
+        if amount <= 0 or amount < min_amt:
+            continue
+        plan.append((rid, amount, rule))
+    return plan
+
+
+def _fmt_proceeds(rid: str, amount: float) -> str:
+    """Строка выручки: байтовые ресурсы — как данные (ГБ), DDT — как DDT."""
+    from . import game_data
+    unit = game_data.sell_unit(rid)
+    if not unit:
+        return "?"
+    price, is_ddt = unit
+    total = amount * price
+    if is_ddt:
+        return "+" + f"{total:,.2f}".replace(",", " ").rstrip("0").rstrip(".") + " DDT"
+    return "+" + game_data.fmt_bytes(total)
+
+
+async def _auto_exchange(cfg: dict, resources: list, ctx: dict, timeout: int) -> list:
+    """Продать ресурсы по правилам через sellItem. Обновляет resources на месте.
+
+    Возвращает список отчётов [{rid, name, amount, proceeds, balance, left}],
+    либо [] если обменивать нечего/обмен выключен. Ошибки — событие в журнал
+    и уведомление, скан в целом не проваливается.
+    """
+    import time as _time
+    from . import game_data
+    plan = _exchange_plan(cfg, resources)
+    if not plan:
+        return []
+    reports, errors = [], []
+    for rid, amount, rule in plan:
+        unit = game_data.sell_unit(rid)
+        name = game_data.ru_name(rid, rid)
+        outcome = tma.run_steps(tma.exchange_steps(rid, amount), dict(ctx), timeout=timeout)
+        ok = outcome["ok"]
+        res = outcome["ctx"]
+        if ok and res.get("sell_left") is None:
+            ok = False  # 200, но без result — считаем ошибкой
+        if not ok:
+            detail = "; ".join(f"{s['name']}: {s['detail']}" for s in outcome["results"] if s["status"] == "fail") \
+                     or (res.get("sell_raw") or "")[:200]
+            errors.append(f"{name} ×{amount:g}: {detail}")
+            break  # auth мог протухнуть — остальные продажи тем же контекстом бессмысленны
+        left = res.get("sell_left")
+        # обновляем balances и состояние ресурса на месте
+        if res.get("sell_coin") is not None:
+            db.kv_set("balance_coin", res["sell_coin"])
+        if res.get("sell_mcoin") is not None:
+            db.kv_set("balance_mcoin", res["sell_mcoin"])
+        for r in resources:
+            if (r.get("id") or game_data.rid_by_name(r.get("name"))) == rid:
+                r["current"] = left
+                if r.get("max"):
+                    r["pct"] = round(left / r["max"] * 100, 1)
+                if (r.get("state") or "").startswith("склад переполнен"):
+                    r["state"] = ""
+                break
+        balance = res.get("sell_mcoin") if unit[1] else res.get("sell_coin")
+        balance_ru = "?"
+        if balance is not None:
+            balance_ru = f"{balance:g} DDT" if unit[1] else game_data.fmt_bytes(balance)
+        reports.append({
+            "rid": rid, "name": name, "amount": amount,
+            "proceeds": _fmt_proceeds(rid, amount),
+            "balance": balance,
+            "balance_ru": balance_ru,
+            "left": left,
+        })
+        db.event("exchange", f"Продано: {name}",
+                 f"{name} ×{amount:g} → {reports[-1]['proceeds']} "
+                 f"(остаток: {left:g}, режим: {'при заполнении' if rule.get('mode') == 'cap' else 'сразу'})")
+        _time.sleep(0.8)  # не дёргаем API игры чаще необходимого
+    if errors:
+        db.event("exchange", "Автообмен: ошибка", "\n".join(errors)[:1000], severity="critical")
+        notify_mod.notify_error(cfg, "Автообмен не удался", "\n".join(errors)[:300])
+    if reports and cfg.get("notify", {}).get("events", {}).get("exchange_report", True):
+        lines = [f"{x['name']} ×{x['amount']:g} → {x['proceeds']} (баланс: {x['balance_ru']})"
+                 for x in reports]
+        notify_mod.notify(cfg, "exchange_report", "Автообмен выполнен",
+                          "\n".join(lines)[:400], open_game=False)
+    return reports
+
+
+def _store_balances(state: dict, ctx: dict) -> None:
+    """Сохранить балансы валют из ответа скана (coin = данные, mCoin = DDT)."""
+    coin = ctx.get("balance_coin")
+    mcoin = ctx.get("balance_mcoin")
+    gs = (state or {}).get("gameStats") or {}
+    if coin is None:
+        coin = gs.get("coin")
+    if mcoin is None:
+        mcoin = gs.get("mCoin")
+    if coin is not None:
+        db.kv_set("balance_coin", coin)
+    if mcoin is not None:
+        db.kv_set("balance_mcoin", mcoin)
+
 
 async def action_scan(cfg: dict) -> dict:
     """Скан: catch-up чтение чата бота + (если настроено) TMA API состояние ресурсов."""
@@ -225,6 +369,13 @@ async def action_scan(cfg: dict) -> dict:
             state = outcome["ctx"].get("game_state")
             resources = parse_resources_doomsday(state) if isinstance(state, dict) else []
             if resources:
+                _store_balances(state, outcome["ctx"])
+                # автообмен ПЕРЕД порогами: обменянный склад не должен
+                # порождать уведомление «почти полон»
+                ex_timeout = int(tma_cfg.get("timeout_seconds", 35))
+                ex_report = await _auto_exchange(cfg, resources, ctx, ex_timeout)
+                if ex_report:
+                    result["exchange"] = ex_report
                 result["resources"] = resources
                 db.resource_snapshot(resources)
                 _check_thresholds(cfg, resources)
@@ -536,6 +687,12 @@ async def action_summary(cfg: dict) -> dict:
             lines.append(f"Цикл производства активен ещё {h} ч {m:02d} мин (до {farm['ends_at'][11:16]})")
         else:
             lines.append("Цикл производства ИСТЁК — нужен ребут")
+    from . import game_data
+    coin, mcoin = db.kv_get("balance_coin"), db.kv_get("balance_mcoin")
+    if coin is not None:
+        lines.append(f"Данные для серверов: {game_data.fmt_bytes(coin)}")
+    if mcoin is not None:
+        lines.append(f"DDT: {mcoin:g}")
     if resources:
         flt = set(cfg.get("notify", {}).get("resource_filter") or [])
         if flt:

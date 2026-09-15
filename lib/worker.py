@@ -209,6 +209,23 @@ def cmd_scan(args) -> int:
     return 0 if r.get("ok") else 1
 
 
+def cmd_exchange(args) -> int:
+    """Скан + автообмен сейчас (не ждём интервала): продать по правилам."""
+    cfg = cfgmod.load()
+    r = engine.run_coro(engine.action_scan(cfg))
+    ex = r.get("exchange") or []
+    if ex:
+        print("Продано:")
+        for x in ex:
+            print(f"  - {x['name']} ×{x['amount']:g} → {x['proceeds']} "
+                  f"(остаток: {x['left']:g}, баланс: {x['balance_ru']})")
+    else:
+        print("По правилам обмена продавать нечего.")
+    print(json.dumps({"ok": r.get("ok"), "resources": len(r.get("resources") or [])},
+                     ensure_ascii=False))
+    return 0 if r.get("ok") else 1
+
+
 def cmd_reboot(args) -> int:
     cfg = cfgmod.load()
     r = engine.run_coro(engine.action_reboot(cfg))
@@ -365,6 +382,16 @@ def cmd_status(args) -> int:
             mx = r.get("maximum")
             pct = f" ({r['current'] / mx * 100:.0f}%)" if mx else ""
             print(f"  - {r['name']}: {r['current']} / {mx if mx is not None else '?'}{pct} {r.get('state') or ''}")
+    from . import game_data
+    coin, mcoin = db.kv_get("balance_coin"), db.kv_get("balance_mcoin")
+    if coin is not None:
+        print(f"Данные для серверов:  {game_data.fmt_bytes(coin)}")
+    if mcoin is not None:
+        print(f"DDT (премиум):        {mcoin:g}")
+    ex = cfg.get("exchange") or {}
+    if ex.get("enabled", True) and (ex.get("rules") or []):
+        on = [str(r.get("rid")) for r in ex["rules"] if r.get("enabled", True)]
+        print(f"Автообмен:            вкл ({', '.join(on) if on else 'правил нет'})")
     url = starter_mod.panel_url(cfg)
     print(f"Веб-панель:          {url}")
     print("Открыть панель:      doomsday panel")
@@ -525,6 +552,35 @@ def cmd_selftest(args) -> int:
     check("каталог ресурсов полный",
           lambda: (len(cat) >= 54 and all(c.get("id") and c.get("name") for c in cat), str(len(cat))))
 
+    print("selftest: продажа/обмен (sellItem)")
+    check("продающиеся ресурсы известны",
+          lambda: (set(gd.SELL_INFO) <= set(gd.NAMES) and len(gd.SELL_INFO) == 6,
+                   ", ".join(gd.SELL_INFO)))
+    check("цены продажи положительные",
+          lambda: (all(v["price"] > 0 for v in gd.SELL_INFO.values()), ""))
+    check("sell_unit/fmt_bytes",
+          lambda: (gd.sell_unit("hdd") == (12582912, False)
+                   and gd.sell_unit("uran_pills") == (1, True)
+                   and gd.sell_unit("iron") is None
+                   and gd.fmt_bytes(525 * 12582912).endswith("ГиБ"),
+                   gd.fmt_bytes(525 * 12582912)))
+    sell_cat = gd.sellable_catalog()
+    check("каталог продажи для панели",
+          lambda: (len(sell_cat) == 6 and all(c.get("unit_ru") for c in sell_cat), ""))
+    ex_steps = tma_mod.exchange_steps("floppy", 12000)
+    body = ex_steps[0]["body"]
+    check("шаг sellItem собирается",
+          lambda: (ex_steps[0]["url"].endswith("/sellItem")
+                   and body["data"]["resourceId"] == "floppy"
+                   and body["data"]["amount"] == 12000
+                   and isinstance(body["data"]["amount"], int), str(body["data"])))
+    rendered = tma_mod.render_template(body, {"init_data": "user=1&hash=abc",
+                                              "session_hash": "abc"})
+    check("число не превращается в строку",
+          lambda: (rendered["data"]["amount"] == 12000
+                   and isinstance(rendered["data"]["amount"], int)
+                   and rendered["data"]["auth"] == "user=1&hash=abc", ""))
+
     print("selftest: графические ассеты игры (иконки/шрифты)")
     import os as _os
     web_items = _os.path.join(paths.WEB_DIR, "assets", "items")
@@ -607,6 +663,51 @@ def cmd_selftest(args) -> int:
                 engine._check_thresholds(cfgmod._deep_merge(cfgmod.DEFAULTS, {}), res2)
                 check("без фильтра — уведомления по всем",
                       lambda: (len(sent) == 2, str(sent)))
+
+                print("selftest: план автообмена")
+                res3 = [
+                    {"name": "Дискета", "id": "floppy", "current": 29000, "max": 31000,
+                     "pct": 93.5, "state": ""},
+                    {"name": "Жёсткий диск", "id": "hdd", "current": 400, "max": 10500,
+                     "pct": 3.8, "state": ""},
+                    {"name": "Кассета", "id": "cassete", "current": 58000, "max": 58000,
+                     "pct": 100.0, "state": "склад переполнен"},
+                    {"name": "Урановые таблетки", "id": "uran_pills", "current": 0.4,
+                     "max": 24, "pct": 1.7, "state": ""},
+                ]
+                plan = engine._exchange_plan(cfgmod.DEFAULTS, res3)
+                plan_map = {rid: amt for rid, amt, _r in plan}
+                check("cap: близкие к капу продаются всё",
+                      lambda: (plan_map.get("floppy") == 29000 and plan_map.get("cassete") == 58000,
+                               str(plan_map)))
+                check("cap: далёкие от капа не трогаются",
+                      lambda: ("hdd" not in plan_map, ""))
+                check("always: дробный остаток меньше min не продаётся",
+                      lambda: ("uran_pills" not in plan_map, str(plan_map.get("uran_pills"))))
+                res3[3]["current"] = 3.0
+                plan2 = engine._exchange_plan(cfgmod.DEFAULTS, res3)
+                check("always: накопилось ≥ min — продаётся",
+                      lambda: ({r: a for r, a, _ in plan2}.get("uran_pills") == 3.0, ""))
+                cfg_keep = cfgmod._deep_merge(cfgmod.DEFAULTS,
+                                              {"exchange": {"rules": [
+                                                  {"rid": "floppy", "mode": "cap",
+                                                   "threshold_pct": 50, "keep": 5000,
+                                                   "min": 1, "enabled": True}]}})
+                plan3 = engine._exchange_plan(cfg_keep, res3)
+                check("keep: оставляем запас на складе",
+                      lambda: ({r: a for r, a, _ in plan3}.get("floppy") == 24000, ""))
+                cfg_off = cfgmod._deep_merge(cfgmod.DEFAULTS, {"exchange": {"enabled": False}})
+                check("обмен выключен — план пуст",
+                      lambda: (engine._exchange_plan(cfg_off, res3) == [], ""))
+                check("валидация ловит мусорные правила",
+                      lambda: (any("не продаётся" in e or "mode" in e
+                                   for e in cfgmod.validate(cfgmod._deep_merge(
+                                       cfgmod.DEFAULTS, {"exchange": {"rules": [
+                                           {"rid": "iron", "mode": "cap", "threshold_pct": 90,
+                                            "keep": 0, "min": 1, "enabled": True}]}}))), ""))
+                check("валидация принимает дефолтные правила",
+                      lambda: (not [e for e in cfgmod.validate(cfgmod.DEFAULTS)
+                                    if e.startswith("exchange")], ""))
             finally:
                 engine.notify_mod.notify = orig_notify
         finally:
@@ -628,6 +729,7 @@ def main(argv=None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("cron", help="плановый проход (для cronie)")
     sub.add_parser("scan", help="скан ресурсов сейчас")
+    sub.add_parser("exchange", help="скан + автообмен сейчас (продать по правилам)")
     sub.add_parser("reboot", help="ребут производства сейчас")
     sub.add_parser("summary", help="сводка дня сейчас")
     sub.add_parser("discover", help="обнаружить API игры")
@@ -666,7 +768,7 @@ def main(argv=None) -> int:
         return {
             "cron": cmd_cron, "scan": cmd_scan, "reboot": cmd_reboot,
             "summary": cmd_summary, "discover": cmd_discover, "check": cmd_check,
-            "login": cmd_login,
+            "login": cmd_login, "exchange": cmd_exchange,
         }[args.cmd](args)
 
 

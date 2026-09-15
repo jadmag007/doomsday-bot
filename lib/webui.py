@@ -118,6 +118,7 @@ def build_overview(cfg: dict) -> dict:
     import datetime
     from . import starter as starter_mod
     from . import tma as tma_mod
+    from . import game_data
     now = datetime.datetime.now()
 
     def since(key):
@@ -142,6 +143,22 @@ def build_overview(cfg: dict) -> dict:
     running = db.running_run()
     checks = db.events_list(limit=5, kind="check")
     farm = starter_mod.farm_deadline_info(cfg)
+    coin, mcoin = db.kv_get("balance_coin"), db.kv_get("balance_mcoin")
+    ex_cfg = cfg.get("exchange") or {}
+    last_ex = db.events_list(limit=5, kind="exchange")
+    exchange = {
+        "enabled": bool(ex_cfg.get("enabled", True)),
+        "rules": ex_cfg.get("rules") or [],
+        "sellable": game_data.sellable_catalog(),
+        "balances": {
+            "coin": coin,
+            "coin_ru": game_data.fmt_bytes(coin) if coin is not None else None,
+            "mcoin": mcoin,
+            "mcoin_ru": (f"{mcoin:g} DDT" if mcoin is not None else None),
+        },
+        "last": [{"ts": e.get("ts"), "title": e.get("title"),
+                   "body": e.get("body")} for e in last_ex],
+    }
     timers = {
         "last_reboot": _iso_min(db.kv_get("last_reboot_ts")),
         "last_scan": _iso_min(db.kv_get("last_scan_ts")),
@@ -167,6 +184,7 @@ def build_overview(cfg: dict) -> dict:
         "timers": timers,
         "resources": resources,
         "resource_filter": (cfg.get("notify", {}).get("resource_filter") or []),
+        "exchange": exchange,
         "running": running or None,
         "events": db.events_list(limit=12),
         "last_check_ok": checks[0].get("severity") == "info" if checks else None,
@@ -225,6 +243,23 @@ class Handler(BaseHTTPRequestHandler):
             return json.loads(self.rfile.read(n).decode("utf-8"))
         except ValueError:
             return {}
+
+    def _body_strict(self):
+        """Тело как объект; (None, причина) при невалидном JSON — для настроек
+        это ошибка, а не «пустой конфиг» (молчаливое стирание недопустимо)."""
+        n = int(self.headers.get("Content-Length") or 0)
+        if n <= 0:
+            return {}, None
+        if n > MAX_BODY:
+            return None, f"тело больше {MAX_BODY // 1024} КБ"
+        raw = self.rfile.read(n).decode("utf-8", errors="replace")
+        try:
+            obj = json.loads(raw)
+        except ValueError as e:
+            return None, f"некорректный JSON: {e}"
+        if not isinstance(obj, dict):
+            return None, "ожидается объект конфига"
+        return obj, None
 
     # --- GET ---
     def do_GET(self):
@@ -312,9 +347,12 @@ class Handler(BaseHTTPRequestHandler):
     do_PUT = do_POST
 
     def _save_config(self, cfg):
-        body = self._body()
-        if not isinstance(body, dict):
-            return self._send_json({"error": "ожидается объект конфига"}, 400)
+        body, err = self._body_strict()
+        if err:
+            return self._send_json({"error": err}, 400)
+        # частичное обновление допустимо: недостающие секции берём из текущего
+        # конфига (PUT только exchange не должен стирать schedules/telegram)
+        body = cfgmod._deep_merge(cfgmod.load(), body)
         # api_hash: пусто или маска → не трогаем
         tg = body.get("telegram") or {}
         if not tg.get("api_hash") or "•" in str(tg.get("api_hash", "")):
@@ -335,7 +373,7 @@ class Handler(BaseHTTPRequestHandler):
     def _action(self, cfg):
         body = self._body()
         action = str(body.get("action") or "").strip()
-        allowed = {"reboot", "scan", "summary", "discover", "check", "test-notify"}
+        allowed = {"reboot", "scan", "summary", "discover", "check", "test-notify", "exchange"}
         if action not in allowed:
             return self._send_json({"error": f"неизвестное действие {action!r}"}, 400)
         rid = spawn_action(action)
