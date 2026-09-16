@@ -1238,6 +1238,66 @@ def cmd_selftest(args) -> int:
                 check("форс в будущем — ждём", lambda: (_due(_dt.datetime.now(), cfgmod.DEFAULTS,
                                                             "scan") is False, ""))
                 db.kv_set("force_scan_at", None)
+
+                print("selftest: ежедневный бонус — цепочка 35 дней (v2.5.0)")
+                from . import game_data
+                check("цепочка: 35 дней",
+                      lambda: (game_data.daily_chain_days() == 35,
+                               str(game_data.daily_chain_days())))
+                _r4 = game_data.daily_reward(4, 12)
+                check("день 4 (ур.12): DDT x10",
+                      lambda: (_r4["reward"] == "ddt" and _r4["amount"] == 10, str(_r4)))
+                _r34 = game_data.daily_reward(34, 7)
+                check("день 34: Quant-бустер (самый редкий)",
+                      lambda: (_r34["reward"] == "quant_token", str(_r34)))
+                _r36 = game_data.daily_reward(36, 1)
+                check("день 36 заворачивается на 1-й",
+                      lambda: (_r36["day"] == 1 and _r36["reward"] == "data", str(_r36)))
+                _r7h = game_data.daily_reward(7, 99)
+                check("уровень клампится сверху (день 7, ур.99 → 40)",
+                      lambda: (_r7h["amount"] == 40, str(_r7h["amount"])))
+                check("формат количества: байты/DDT/токен",
+                      lambda: (game_data.fmt_daily_amount("data", 524288) == "512 КиБ"
+                               and game_data.fmt_daily_amount("ddt", 12) == "12 DDT"
+                               and game_data.fmt_daily_amount("cpu_token", 1) == "x1",
+                               game_data.fmt_daily_amount("data", 524288)))
+                engine._store_daily_state({"currentDay": 4, "LVL": 12,
+                                           "lastClaimedDate": 1234567890123.0})
+                _ds = db.kv_get("daily_state") or {}
+                check("скан сохраняет день/уровень/дату сбора",
+                      lambda: (_ds.get("current_day") == 4 and _ds.get("level") == 12
+                               and _ds.get("last_claimed") == 1234567890123, str(_ds)))
+                engine._store_daily_state({"gameStats": {}})
+                check("без полей ежедневки стейт не трогается",
+                      lambda: (db.kv_get("daily_state") == _ds,
+                               str(db.kv_get("daily_state"))))
+
+                print("selftest: полночь МСК и резервный cron (v2.5.0)")
+                from . import webui as webui_mod
+                _day_ms = 86400 * 1000
+                # 21:00 UTC 01.01.1970 = 00:00 МСК 02.01 — известная граница дня
+                _mid = 75600000
+                check("полночь МСК: индекс дня растёт ровно по суткам",
+                      lambda: (webui_mod.msk_day_index(_mid) == webui_mod.msk_day_index(_mid - 1) + 1
+                               and webui_mod.msk_day_index(0) == 0
+                               and webui_mod.msk_day_index(3 * 3600 * 1000 - 1) == 0,
+                               ""))
+                check("полночь МСК: следующая — ровно через сутки",
+                      lambda: (webui_mod.next_msk_midnight_ms(_mid) == _mid + _day_ms,
+                               str(webui_mod.next_msk_midnight_ms(_mid))))
+                check("полночь МСК: за 1 мс до полуночи — ближайшая же",
+                      lambda: (webui_mod.next_msk_midnight_ms(_mid - 1) == _mid,
+                               str(webui_mod.next_msk_midnight_ms(_mid - 1))))
+                _now_iso = _dt.datetime.now().isoformat(timespec="seconds")
+                check("резерв: свежий last_cron — не протух",
+                      lambda: (webui_mod._fallback_stale_sec(_now_iso) < 60, ""))
+                check("резерв: старый last_cron — протух",
+                      lambda: (webui_mod._fallback_stale_sec(
+                          (_dt.datetime.now() - _dt.timedelta(minutes=20)).isoformat(
+                              timespec="seconds")) > webui_mod.CRON_FALLBACK_AFTER_SEC, ""))
+                check("резерв: пустой/битый last_cron — None",
+                      lambda: (webui_mod._fallback_stale_sec("") is None
+                               and webui_mod._fallback_stale_sec("мусор") is None, ""))
             finally:
                 engine.notify_mod.notify = orig_notify
         finally:

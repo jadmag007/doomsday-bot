@@ -464,6 +464,32 @@ def _store_balances(state: dict, ctx: dict) -> None:
         db.kv_set("balance_mcoin", mcoin)
 
 
+def _store_daily_state(state: dict) -> None:
+    """Сохранить состояние ежедневного бонуса из ответа initUser.
+
+    Реверс daily-DoG6l0eh.js / use-is-claimed-today игры: LVL — уровень
+    игрока (индексирует количество награды), currentDay — последний
+    собранный день цепочки (1..35), lastClaimedDate — epoch мс последнего
+    сбора. Полночь сброса — МСК (фикс. +3ч), см. webui._daily_info().
+    """
+    if not isinstance(state, dict):
+        return
+    day = state.get("currentDay")
+    lvl = state.get("LVL")
+    claimed = state.get("lastClaimedDate")
+    if day is None and lvl is None and claimed is None:
+        return
+    try:
+        db.kv_set("daily_state", {
+            "current_day": int(day) if isinstance(day, (int, float)) else None,
+            "level": int(lvl) if isinstance(lvl, (int, float)) else None,
+            "last_claimed": int(claimed) if isinstance(claimed, (int, float)) else None,
+            "at": db.now_iso(),
+        })
+    except (TypeError, ValueError):
+        pass
+
+
 def compute_ddt_eta(resources: list) -> dict:
     """Время до следующей единицы каждого DDT-продающегося ресурса.
 
@@ -578,6 +604,7 @@ async def action_scan(cfg: dict, sell_all: bool = False) -> dict:
             resources = parse_resources_doomsday(state) if isinstance(state, dict) else []
             if resources:
                 _store_balances(state, outcome["ctx"])
+                _store_daily_state(state)
                 # ETA следующих DDT-ресурсов (для статусбара панели)
                 db.kv_set("ddt_eta", compute_ddt_eta(resources))
                 # автообмен ПЕРЕД порогами: обменянный склад не должен
@@ -780,6 +807,7 @@ async def _refresh_after_reboot(cfg: dict, ctx: dict, timeout: int,
             state = re_out["ctx"]["game_state"]
             ex_ctx = re_out["ctx"]
             _store_balances(state, ex_ctx)
+            _store_daily_state(state)
             ends = ex_ctx.get("farm_ends_at")
             if isinstance(ends, (int, float)):
                 db.kv_set("passive_farm_ends_at", str(int(ends)))

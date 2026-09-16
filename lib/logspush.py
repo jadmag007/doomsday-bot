@@ -178,6 +178,11 @@ def _is_rotated_archive(fname: str) -> bool:
     return all(c.isdigit() or c in "-_" for c in tail)
 
 
+def _is_run_log(fname: str) -> bool:
+    """run-<id>.log — результат одного запуска, дописывается только этим запуском."""
+    return fname.startswith("run-") and fname.endswith(".log")
+
+
 def _trim_consumed(path: str, snap_ino, snap_size) -> str:
     """Обрезать из лог-файла уже отправленную часть (v2.4.4).
 
@@ -239,12 +244,14 @@ def _clear_pushed_logs(manifest: dict) -> int:
         if status != "trimmed":
             continue
         cleared += 1
-        if _is_rotated_archive(fname):
-            try:
-                if os.path.getsize(p) == 0:
-                    os.unlink(p)   # архив отправлен целиком и не растёт
-            except OSError:
-                pass
+        # отправленный целиком файл, который больше не растёт — удаляем:
+        # ротационные архивы и run-логи (write-once); иначе на устройстве
+        # копятся пустые run-1.log…run-N.log после каждой выгрузки
+        try:
+            if os.path.getsize(p) == 0 and (_is_rotated_archive(fname) or _is_run_log(fname)):
+                os.unlink(p)
+        except OSError:
+            pass
     for fname in manifest.get("reports") or []:
         try:
             os.unlink(os.path.join(paths.REPORTS_DIR, fname))

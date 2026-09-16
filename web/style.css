@@ -322,7 +322,27 @@ textarea.json-invalid { border-color: var(--danger); }
 .sb-chip.stale { color: var(--danger); border-color: rgba(255, 95, 86, .5); }
 .sb-chip.stale .sb-ico { color: var(--danger); animation: sb-blink 1.2s steps(2) infinite; }
 @keyframes sb-blink { 50% { opacity: .25; } }
-.sb-ddt .sb-img { width: 14px; height: 14px; }
-.sb-ddt .sb-eta { color: var(--gold); }
-.sb-ddt .sb-count { color: var(--muted); opacity: .85; }
+
+/* ребут производства — как в игре: «Осталось ЧЧ:ММ:СС» → «Завершено!» */
+.sb-reboot { color: var(--text); }
+.sb-reboot .sb-ico { color: var(--muted); }
+.sb-reboot.soon { color: var(--gold); border-color: rgba(218, 188, 49, .5); }
+.sb-reboot.soon .sb-ico { color: var(--gold); }
+.sb-reboot.done { color: var(--danger); border-color: rgba(255, 95, 86, .55);
+  animation: sb-blink 1.2s steps(2) infinite; }
+.sb-reboot.done .sb-ico { color: var(--danger); }
+
+/* ежедневный бонус: до полуночи МСК + награда следующего дня */
+.sb-daily-r { color: var(--gold); margin-left: .1rem; }
+.sb-daily.avail { color: var(--gold); border-color: rgba(218, 188, 49, .55); }
+.sb-daily.avail .sb-ico { color: var(--gold); }
+
+/* DDT-ресурс: маленькая иконка на прозрачном фоне + «+N time» */
+.sb-bare { display: inline-flex; align-items: center; gap: .3rem;
+  padding: .18rem .25rem; background: transparent; border: none; white-space: nowrap; }
+.sb-bare .sb-img { width: 15px; height: 15px; display: block; }
+.sb-bare .sb-ddt-txt { color: var(--text); }
+.sb-bare .sb-ddt-txt #sb-ddt-n, .sb-bare .sb-ddt-txt > span:first-child { color: var(--gold); }
+.sb-bare.idle { opacity: .45; }
+
 .sb-night { color: #9aa7d8; border-color: rgba(154, 167, 216, .35); }

@@ -13,6 +13,7 @@
   POST /api/restart-web       — перезапуск сервиса панели
   POST /api/login             — вход по PIN (если задан)
 """
+import datetime
 import hashlib
 import json
 import logging
@@ -20,6 +21,7 @@ import os
 import secrets
 import subprocess
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -180,6 +182,11 @@ def build_overview(cfg: dict) -> dict:
     last_cron = since("last_cron_ts")
     cron_alive = last_cron is not None and (now - last_cron).total_seconds() <= 25 * 60
     ddt_eta = db.kv_get("ddt_eta") or {}
+    if isinstance(ddt_eta, str):   # страховка от двойного кодирования
+        try:
+            ddt_eta = json.loads(ddt_eta)
+        except ValueError:
+            ddt_eta = {}
     timers = {
         "last_reboot": _iso_min(db.kv_get("last_reboot_ts")),
         "last_scan": _iso_min(db.kv_get("last_scan_ts")),
@@ -211,6 +218,7 @@ def build_overview(cfg: dict) -> dict:
         "exchange": exchange,
         "security": security,
         "ddt_eta": ddt_eta,
+        "daily": _daily_info(),
         "running": running or None,
         "events": db.events_list(limit=12),
         "last_check_ok": checks[0].get("severity") == "info" if checks else None,
@@ -409,10 +417,147 @@ class Handler(BaseHTTPRequestHandler):
 
 # ---------------- запуск ----------------
 
+# Полночь МСК в epoch мс — по коду игры (use-is-claimed-today: +3ч к UTC,
+# затем календарная дата). Фиксированное смещение, не часовой пояс устройства.
+MSK_OFFSET_MS = 3 * 3600 * 1000
+DAY_MS = 86400 * 1000
+
+
+def msk_day_index(ms: float) -> int:
+    """Номер календарного дня МСК для epoch мс (для сравнения «в тот же день?»)."""
+    return int((ms + MSK_OFFSET_MS) // DAY_MS)
+
+
+def next_msk_midnight_ms(ms: float) -> int:
+    """Ближайшая ПОСЛЕДУЮЩАЯ полночь МСК (epoch мс) — момент обновления дня награды."""
+    return (msk_day_index(ms) + 1) * DAY_MS - MSK_OFFSET_MS
+
+
+def _daily_info() -> dict:
+    """Секция «daily» для /api/overview: цепочка ежедневных наград.
+
+    Логика — реверс use-is-claimed-today-DlhbwbfL.js: день награды обновляется
+    в полночь МСК; если с последнего сбора прошло ≥2 календарных дней МСК —
+    цепочка сбрасывается на 1-й день (g>=2 → 1, иначе currentDay+1 с wrap 35→1).
+    """
+    from . import game_data
+    now_ms = time.time() * 1000
+    out = {
+        "reset_in_sec": max(0, int((next_msk_midnight_ms(now_ms) - now_ms) / 1000)),
+        "known": False,
+        "claimed_today": None,
+        "current_day": None,
+        "level": None,
+        "next_day": None,
+        "next_reward": None,
+        "next_reward_short": "",
+        "at": None,
+    }
+    raw = db.kv_get("daily_state")
+    if isinstance(raw, dict):
+        st = raw
+    elif isinstance(raw, str) and raw:
+        try:
+            st = json.loads(raw)
+        except ValueError:
+            st = None
+    else:
+        st = None
+    if not isinstance(st, dict):
+        return out
+    out["known"] = True
+    out["current_day"] = st.get("current_day")
+    out["level"] = st.get("level")
+    out["at"] = st.get("at")
+    cur = st.get("current_day") or 1
+    last = st.get("last_claimed")
+    if isinstance(last, (int, float)) and last > 0:
+        gap = msk_day_index(now_ms) - msk_day_index(float(last))
+        if gap <= 0:
+            out["claimed_today"] = True
+            out["next_day"] = cur + 1 if cur < game_data.daily_chain_days() else 1
+        elif gap == 1:
+            # вчера собирали — сегодня доступен следующий день цепочки
+            out["claimed_today"] = False
+            out["next_day"] = cur + 1 if cur < game_data.daily_chain_days() else 1
+        else:
+            # день(и) пропущены — цепочка сбросится на 1-й
+            out["claimed_today"] = False
+            out["next_day"] = 1
+    else:
+        out["claimed_today"] = False
+        out["next_day"] = cur
+    info = game_data.daily_reward(out["next_day"], st.get("level"))
+    out["next_reward"] = {k: info[k] for k in ("day", "reward", "name_ru", "amount")}
+    out["next_reward_short"] = game_data.fmt_daily_amount(info["reward"], info["amount"])
+    return out
+
+
+# Порог «cron молчит»: проходы каждые 10 мин + запас. Если дольше — панель
+# сама запускает проход (cronie мог умереть; после разморозки Android он не
+# всегда оживает, а сервис панели жив и может подстраховать).
+CRON_FALLBACK_AFTER_SEC = 660
+
+
+def _fallback_stale_sec(last_cron_iso, now=None) -> float:
+    """Сколько секунд назад был последний проход cron (None — никогда/битое значение)."""
+    if not last_cron_iso:
+        return None
+    try:
+        last = datetime.datetime.fromisoformat(str(last_cron_iso))
+    except ValueError:
+        return None
+    now = now or datetime.datetime.now()
+    return max(0.0, (now - last).total_seconds())
+
+
+def _cron_fallback_loop() -> None:
+    """Резервный планировщик в процессе веб-панели.
+
+    Случай 16.09 07:04: окно авто-ребута пришлось на замороженный Android'ом
+    Termux — проходы cron не выполнялись, ребут не случился, производство
+    простояло. cronie живёт отдельным процессом и умирает независимо от
+    сервиса панели; после оттайки телефона никто его не перезапускает.
+    Здесь панель (runit следит за ней и перезапускает при падении) каждые
+    60 секунд смотрит на last_cron_ts: если проходов не видно дольше
+    CRON_FALLBACK_AFTER_SEC — сама запускает `doomsday cron`. Каждый проход
+    (в т.ч. резервный и ночной) обновляет last_cron_ts, поэтому при живом
+    cronie резерв никогда не срабатывает и дублей не бывает (плюс блокировка
+    SingleInstance в самом воркере — неблокирующая, лишний выход мгновенен).
+    """
+    while True:
+        time.sleep(60)
+        try:
+            cfg = cfgmod.load()
+            if not (cfg.get("web") or {}).get("cron_fallback", True):
+                continue
+            stale = _fallback_stale_sec(db.kv_get("last_cron_ts"))
+            if stale is not None and stale <= CRON_FALLBACK_AFTER_SEC:
+                continue
+            subprocess.Popen(["sh", paths.BIN_DOOMSDAY, "cron"], cwd=paths.APP_DIR,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+            # событие — не чаще раза в час, чтобы не засорять журнал
+            note_age = _fallback_stale_sec(db.kv_get("last_cron_fallback_note"))
+            if note_age is None or note_age > 3600:
+                db.kv_set("last_cron_fallback_note", db.now_iso())
+                db.event("web", "Резервный проход cron",
+                         "Проходы cron не видны дольше "
+                         f"{CRON_FALLBACK_AFTER_SEC // 60} мин — панель запустила "
+                         "проход сама (cronie не жив?).")
+        except Exception as e:  # поток живёт вечно и не должен падать
+            try:
+                log.warning("Резервный планировщик: %s", e)
+            except Exception:
+                pass
+
+
 def serve_forever(cfg: dict) -> None:
     host = cfg.get("web", {}).get("host", "127.0.0.1")
     port = int(cfg.get("web", {}).get("port", 8080) or 8080)
     httpd = ThreadingHTTPServer((host, port), Handler)
+    threading.Thread(target=_cron_fallback_loop, daemon=True,
+                     name="cron-fallback").start()
     pin = " (PIN включён)" if cfg.get("web", {}).get("pin") else ""
     print(f"Веб-панель: http://{host}:{port}{pin}")
     db.event("web", "Веб-панель запущена", f"http://{host}:{port}")
