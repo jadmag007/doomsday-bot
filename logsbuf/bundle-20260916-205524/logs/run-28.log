@@ -1,0 +1,23 @@
+{
+  "ok": true,
+  "steps": [
+    {
+      "name": "chat:/start",
+      "status": "ok",
+      "detail": "Отправлен /start боту"
+    },
+    {
+      "name": "initUser",
+      "status": "ok",
+      "detail": "HTTP 200; извлечено: game_state, farm_ends_at, is_premium, balance_coin, balance_mcoin"
+    },
+    {
+      "name": "rebootProduction",
+      "status": "skip",
+      "detail": "цикл уже свежий (до 16.09 20:44) — ребут не нужен"
+    }
+  ],
+  "notes": [],
+  "farm_ends_at": 1789580694231,
+  "cycle_until": "16.09 20:44"
+}

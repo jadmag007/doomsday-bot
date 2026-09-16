@@ -1,0 +1,28 @@
+20:54:53 INFO telethon.crypto.aes: libssl detected, it will be used for encryption
+20:54:53 INFO telethon.network.mtprotosender: Connecting to 149.154.167.51:443/TcpFull...
+20:54:53 INFO telethon.network.mtprotosender: Connection to 149.154.167.51:443/TcpFull complete!
+20:55:01 INFO telethon.network.mtprotosender: Disconnecting from 149.154.167.51:443/TcpFull...
+20:55:01 INFO telethon.network.mtprotosender: Disconnection from 149.154.167.51:443/TcpFull complete!
+{
+  "ok": true,
+  "steps": [
+    {
+      "name": "chat:/start",
+      "status": "ok",
+      "detail": "Отправлен /start боту"
+    },
+    {
+      "name": "initUser",
+      "status": "ok",
+      "detail": "HTTP 200; извлечено: game_state, farm_ends_at, is_premium, balance_coin, balance_mcoin"
+    },
+    {
+      "name": "rebootProduction",
+      "status": "ok",
+      "detail": "HTTP 200; извлечено: reboot_active, reboot_started_at, reboot_ends_at"
+    }
+  ],
+  "notes": [],
+  "farm_ends_at": 1789624498503,
+  "cycle_until": "17.09 08:54"
+}

@@ -1,0 +1,95 @@
+{
+  "telegram": {
+    "api_id": 34585776,
+    "api_hash": "75f78a925bd7ee2058ddb5a1cd23144c",
+    "phone": "+79062468202",
+    "session": "doomsday",
+    "game_bot": "@DoomsDayTyrannybot",
+    "app_short_name": "play"
+  },
+  "schedules": {
+    "reboot_interval_hours": 12,
+    "scan_interval_minutes": 45,
+    "summary_time": "20:00",
+    "update_check_minutes": 60,
+    "retry_failed_minutes": 20
+  },
+  "tma": {
+    "enabled": true,
+    "base_url": "",
+    "timeout_seconds": 25,
+    "steps_reboot": [],
+    "steps_scan": [],
+    "resources": {
+      "json_path": "",
+      "fields": {
+        "name": "name",
+        "current": "amount",
+        "max": "capacity",
+        "state": "state"
+      },
+      "text_patterns": [
+        {
+          "name": "Ресурс",
+          "regex": "([А-Яа-яЁёA-Za-z ]{2,24})[:\\s]+(\\d[\\d\\s.,]*)\\s*/\\s*(\\d[\\d\\s.,]*)",
+          "enabled": true
+        }
+      ]
+    }
+  },
+  "chat": {
+    "read_last_messages": 20,
+    "send_start_on_reboot": true,
+    "parse_patterns": [
+      {
+        "match": "[Сс]клад переполнен",
+        "severity": "warn",
+        "notify": true,
+        "title": "Склад переполнен"
+      },
+      {
+        "match": "[Тт]ребуется перезагрузка|ребут",
+        "severity": "warn",
+        "notify": true,
+        "title": "Требуется перезагрузка"
+      },
+      {
+        "match": "[Пп]ерегрев",
+        "severity": "info",
+        "notify": false,
+        "title": "Перегрев производства"
+      }
+    ]
+  },
+  "notify": {
+    "enabled": true,
+    "warn_threshold_pct": 90,
+    "events": {
+      "resource_warn": true,
+      "resource_full": true,
+      "reboot_report": true,
+      "scan_report": false,
+      "errors": true,
+      "daily_summary": true,
+      "update_applied": true,
+      "chat_alerts": true
+    },
+    "priority_high": [
+      "resource_full",
+      "errors"
+    ],
+    "open_game_button": true
+  },
+  "updater": {
+    "enabled": true,
+    "download_dir": "",
+    "pattern": "doomsday-bot-v*.zip",
+    "keep_applied": 5,
+    "restart_web_on_update": true
+  },
+  "web": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "pin": ""
+  }
+}
