@@ -378,6 +378,30 @@ def cmd_exchange(args) -> int:
     return 0 if r.get("ok") else 1
 
 
+def cmd_sell_all(args) -> int:
+    """Собрать всю память: скан + продать ВСЕ байтовые носители сейчас.
+
+    Мимо правил/порогов/переключателя автообмена — ручное действие из
+    панели («Собрать всю память»). DDT-ресурсы не трогаем.
+    """
+    cfg = cfgmod.load()
+    r = engine.run_coro(engine.action_scan(cfg, sell_all=True))
+    ex = r.get("exchange") or []
+    if ex:
+        print("Собрано памяти:")
+        for x in ex:
+            extra = (f", запрошено: {x['requested']:g}"
+                     if x.get("requested") is not None and (x.get("requested") or 0) - (x.get("amount") or 0) >= 1
+                     else "")
+            print(f"  - {x['name']} ×{x['amount']:g} → {x['proceeds']} "
+                  f"(остаток: {x['left']:g}, баланс: {x['balance_ru']}{extra})")
+    else:
+        print("Памяти для продажи нет: байтовые носители на складах отсутствуют.")
+    print(json.dumps({"ok": r.get("ok"), "resources": len(r.get("resources") or []),
+                      "sell_all": True}, ensure_ascii=False))
+    return 0 if r.get("ok") else 1
+
+
 def cmd_reboot(args) -> int:
     cfg = cfgmod.load()
     r = engine.run_coro(engine.action_reboot(cfg))
@@ -862,25 +886,72 @@ def cmd_selftest(args) -> int:
             check("прун оставляет последние 20 run-логов",
                   lambda: (len(_glob.glob(os.path.join(paths.LOG_DIR, "run-*.log"))) == 20, ""))
             from . import logspush as _lpm
+            # v2.4.4: точная обрезка отправленного по снапшоту (inode+размер)
+            # вместо окна «моложе 5 минут не трогать»
+            import tempfile as _tf
+            with _tf.TemporaryDirectory() as _td:
+                _f1 = os.path.join(_td, "a.log")
+                with open(_f1, "wb") as f:
+                    f.write(b"line1\nline2\n")
+                _st1 = os.stat(_f1)
+                with open(_f1, "ab") as f:  # писатель дописал ПОСЛЕ снапшота
+                    f.write(b"line3\n")
+                check("trim: дозаписанное после снапшота сохранено",
+                      lambda: (_lpm._trim_consumed(_f1, _st1.st_ino, _st1.st_size) == "trimmed"
+                               and open(_f1, "rb").read() == b"line3\n", ""))
+                _f2 = os.path.join(_td, "b.log")
+                with open(_f2, "wb") as f:
+                    f.write(b"x\n")
+                _st2 = os.stat(_f2)
+                check("trim: неизменный лог обрезан до пустого",
+                      lambda: (_lpm._trim_consumed(_f2, _st2.st_ino, _st2.st_size) == "trimmed"
+                               and os.path.getsize(_f2) == 0, ""))
+                _f3 = os.path.join(_td, "c.log")
+                with open(_f3, "wb") as f:
+                    f.write(b"new\n")
+                check("trim: ротированный (другой inode) не тронут",
+                      lambda: (_lpm._trim_consumed(_f3, 999999, 0) == "rotated"
+                               and open(_f3, "rb").read() == b"new\n", ""))
+                _st3b = os.stat(_f3)
+                check("trim: без снапшота — статус shrunk, файл цел",
+                      lambda: (_lpm._trim_consumed(_f3, _st3b.st_ino, None) == "shrunk"
+                               and open(_f3, "rb").read() == b"new\n", ""))
+                check("trim: отсутствующий файл — gone",
+                      lambda: (_lpm._trim_consumed(os.path.join(_td, "nope.log"), 1, 0) == "gone", ""))
             _old = os.path.join(paths.LOG_DIR, "bot.log")
             with open(_old, "w") as f:
                 f.write("старые строки")
-            os.utime(_old, (1700000000, 1700000000))  # давно менялся
-            _new = os.path.join(paths.LOG_DIR, "cron.log")
+            _snap_old = os.stat(_old)
+            _new = os.path.join(paths.LOG_DIR, "cron.log")   # свежий по mtime — больше не помеха
             with open(_new, "w") as f:
                 f.write("свежее")
+            _snap_new = os.stat(_new)
+            _rot = os.path.join(paths.LOG_DIR, "bot.log.1")
+            with open(_rot, "w") as f:
+                f.write("ротационный архив")
+            _snap_rot = os.stat(_rot)
             _rep = os.path.join(paths.REPORTS_DIR, "discovery-x.json")
             with open(_rep, "w") as f:
                 f.write("{}")
-            os.utime(_rep, (1700000000, 1700000000))
-            cleared = _lpm._clear_pushed_logs({"logs": ["bot.log", "cron.log"],
-                                               "reports": ["discovery-x.json"]})
-            check("отправленный старый лог обрезан",
-                  lambda: (os.path.getsize(_old) == 0 and cleared == 1, str(cleared)))
-            check("недавно менявшийся лог не тронут",
-                  lambda: (os.path.getsize(_new) > 0, ""))
-            check("отправленный старый отчёт удалён",
+            cleared = _lpm._clear_pushed_logs({
+                "logs": ["bot.log", "cron.log", "bot.log.1"],
+                "log_state": {
+                    "bot.log": {"ino": _snap_old.st_ino, "size": _snap_old.st_size},
+                    "cron.log": {"ino": _snap_new.st_ino, "size": _snap_new.st_size},
+                    "bot.log.1": {"ino": _snap_rot.st_ino, "size": _snap_rot.st_size}},
+                "reports": ["discovery-x.json"]})
+            check("логи обрезаны сразу, без 5-минутного окна",
+                  lambda: (cleared == 3 and os.path.getsize(_old) == 0
+                           and os.path.getsize(_new) == 0, str(cleared)))
+            check("ротационный архив после отправки удалён",
+                  lambda: (not os.path.isfile(_rot), ""))
+            check("отправленный отчёт удалён",
                   lambda: (not os.path.isfile(_rep), ""))
+            with open(_old, "w") as f:
+                f.write("данные")
+            _lpm._clear_pushed_logs({"logs": ["bot.log"]})  # манифест без снапшота
+            check("манифест без снапшота — лог не тронут",
+                  lambda: (os.path.getsize(_old) > 0, ""))
             paths.LOG_DIR, paths.REPORTS_DIR = old_log_dir, old_rep_dir
 
             print("selftest: ребут по циклу и фильтр уведомлений")
@@ -961,6 +1032,28 @@ def cmd_selftest(args) -> int:
                 cfg_off = cfgmod._deep_merge(cfgmod.DEFAULTS, {"exchange": {"enabled": False}})
                 check("обмен выключен — план пуст",
                       lambda: (engine._exchange_plan(cfg_off, res3) == [], ""))
+                # force_all («собрать всю память»): мимо правил и выключателя
+                plan_f = engine._exchange_plan(cfg_off, res3, force_all=True)
+                fmap = {rid: amt for rid, amt, rule in plan_f}
+                check("sell-all: все байтовые носители в плане (даже при выключенном обмене)",
+                      lambda: (fmap.get("floppy") == 29000 and fmap.get("hdd") == 400
+                               and fmap.get("cassete") == 58000, str(fmap)))
+                check("sell-all: DDT-ресурсы не трогаются",
+                      lambda: ("uran_pills" not in fmap and "u235" not in fmap
+                               and "ddt_res" not in fmap, str(fmap)))
+                check("sell-all: правило помечено как manual с keep=0",
+                      lambda: (all(rule.get("mode") == "manual" and rule.get("keep") == 0
+                                   for _rid, _amt, rule in plan_f), ""))
+                res4 = [dict(r) for r in res3 if r["id"] != "hdd"]
+                check("sell-all: пустые склады пропускаются",
+                      lambda: ("hdd" not in {r: a for r, a, _ in
+                                             engine._exchange_plan(cfgmod.DEFAULTS, res4,
+                                                                   force_all=True)}, ""))
+                check("sell-all: пустой склад — план пуст",
+                      lambda: (engine._exchange_plan(cfgmod.DEFAULTS,
+                                                     [{"id": "uran_pills", "current": 5,
+                                                       "max": 24, "pct": 20, "state": ""}],
+                                                     force_all=True) == [], ""))
                 check("валидация ловит мусорные правила",
                       lambda: (any("не продаётся" in e or "mode" in e
                                    for e in cfgmod.validate(cfgmod._deep_merge(
@@ -1167,6 +1260,7 @@ def main(argv=None) -> int:
     sub.add_parser("cron", help="плановый проход (для cronie)")
     sub.add_parser("scan", help="скан ресурсов сейчас")
     sub.add_parser("exchange", help="скан + автообмен сейчас (продать по правилам)")
+    sub.add_parser("sell-all", help="собрать всю память: продать все носители сейчас (мимо правил)")
     sub.add_parser("reboot", help="ребут производства сейчас")
     sub.add_parser("summary", help="сводка дня сейчас")
     sub.add_parser("discover", help="обнаружить API игры")
@@ -1194,8 +1288,8 @@ def main(argv=None) -> int:
 
     # cron — НЕ блокирующийся: предыдущий проход ещё жив → тихо выходим
     # (иначе зависший проход навсегда останавливает всю автоматизацию);
-    # ручные reboot/scan/exchange — ждут своей очереди
-    wait_lock = args.cmd in ("reboot", "scan", "exchange")
+    # ручные reboot/scan/exchange/sell-all — ждут своей очереди
+    wait_lock = args.cmd in ("reboot", "scan", "exchange", "sell-all")
     no_lock = {"web": cmd_web, "panel": cmd_panel, "selftest": cmd_selftest, "setup": cmd_setup,
                "status": cmd_status, "log": cmd_log, "test-notify": cmd_test_notify,
                "start": cmd_start, "stop": cmd_stop, "logs-push": cmd_logs_push,
@@ -1208,7 +1302,7 @@ def main(argv=None) -> int:
         return {
             "cron": cmd_cron, "scan": cmd_scan, "reboot": cmd_reboot,
             "summary": cmd_summary, "discover": cmd_discover, "check": cmd_check,
-            "login": cmd_login, "exchange": cmd_exchange,
+            "login": cmd_login, "exchange": cmd_exchange, "sell-all": cmd_sell_all,
         }[args.cmd](args)
 
 

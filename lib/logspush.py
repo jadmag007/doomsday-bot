@@ -8,11 +8,17 @@
     исходников (тоже в .gitignore), коммитит их в ОТДЕЛЬНУЮ ветку `logs`
     и пушит в GitHub; основная ветка (main) остаётся чистой — код и логи
     не смешиваются;
-  - после успешного пуша: локальный logsbuf/ удаляется, а ОТПРАВЛЕННЫЕ
-    логи обрезаются, отчёты удаляются (v2.4.3) — каждая следующая выгрузка
-    несёт только записи, накопившиеся после предыдущей, и не путается со
-    старыми; разобранные ассистентом бандлы он переносит в archive/ той же
-    ветки logs — в корне ветки всегда только неразобранное.
+  - после успешного пуша отправленные логи обрезаются ТОЧНО ПО СНАПШОТУ
+    (v2.4.4): в момент сборки для каждого файла запоминаем inode и размер,
+    после пуша отрезаем ровно отправленную часть — на устройстве остаются
+    только записи, сделанные ПОСЛЕ сборки. Никаких временных окон: в v2.4.3
+    файлы моложе 5 минут пропускались (cron.log после свежего скана, web.log
+    после рестарта сервиса) и целиком уезжали в следующий бандл — выгрузки
+    путались (диагностика 15.09: бандл 20:08 ушёл с v2.4.2 вовсе без обрезки,
+    и бандл 23:18 продублировал весь день). Отчёты удаляются, ротационные
+    архивы (*.log.1), отправленные целиком, — тоже;
+  - разобранные ассистентом бандлы он переносит в archive/ той же ветки
+    logs (с пруном до последних 6) — в logsbuf/ всегда только неразобранное.
 
 Механика коммита без касания рабочего каталога: временный GIT_INDEX_FILE
 (read-tree → git add -f logsbuf/… → write-tree → commit-tree → push).
@@ -83,7 +89,7 @@ def _tail_file(path: str, out_path: str) -> int:
 def build_bundle(bundle_dir: str) -> dict:
     """Собрать бандл логов/отчётов/метаданных в bundle_dir. Возвращает манифест."""
     os.makedirs(bundle_dir, exist_ok=True)
-    manifest = {"logs": [], "reports": [], "config": [], "bytes": 0}
+    manifest = {"logs": [], "reports": [], "config": [], "bytes": 0, "log_state": {}}
 
     # 1) метаданные
     meta = {
@@ -108,12 +114,21 @@ def build_bundle(bundle_dir: str) -> dict:
         json.dump(meta, f, ensure_ascii=False, indent=2)
     manifest["bytes"] += os.path.getsize(os.path.join(bundle_dir, "meta.json"))
 
-    # 2) логи (хвост каждого файла, включая ротацию bot.log.1 и сервисные)
+    # 2) логи (хвост каждого файла, включая ротацию bot.log.1 и сервисные).
+    #    Снапшот inode+размера делаем ДО чтения: если файл растёт прямо во
+    #    время сборки, излишек останется на устройстве и уйдёт следующим
+    #    бандлом — ничего не теряем (отправлено не меньше снапшота).
     logs_dst = os.path.join(bundle_dir, "logs")
     os.makedirs(logs_dst, exist_ok=True)
     for p in sorted(glob.glob(os.path.join(paths.LOG_DIR, "*.log*"))):
         if not os.path.isfile(p):
             continue
+        try:
+            _st = os.stat(p)
+            manifest["log_state"][os.path.basename(p)] = {
+                "ino": _st.st_ino, "size": _st.st_size}
+        except OSError:
+            pass
         n = _tail_file(p, os.path.join(logs_dst, os.path.basename(p)))
         manifest["logs"].append(os.path.basename(p))
         manifest["bytes"] += n
@@ -155,36 +170,84 @@ def _prune_old_bundles(keep: int = 3) -> None:
         pass
 
 
-def _clear_pushed_logs(manifest: dict) -> int:
-    """После успешного пуша: обрезать отправленные логи, удалить отправленные
-    отчёты. Каждый бандл несёт ХВОСТ текущих логов — без очистки утренние
-    записи повторялись бы в каждой выгрузке и путались с новыми (просьба
-    владельца 15.09: «чтобы с новыми выгрузками не путались»).
+def _is_rotated_archive(fname: str) -> bool:
+    """Похоже ли имя на ротационный архив лога (bot.log.1 и т.п.)."""
+    _base, sep, tail = fname.rpartition(".log.")
+    if sep != ".log." or not tail:
+        return False
+    return all(c.isdigit() or c in "-_" for c in tail)
 
-    Безопасность: все писатели логов открывают файлы в append-режиме
-    (RotatingFileHandler bot.log, шелл-редирект cron.log/web.log), поэтому
-    обрезка на месте (open 'w') корректна — следующие записи пойдут с нуля.
-    Файлы, менявшиеся за последние 5 минут, не трогаем: вдруг идёт запись
-    (например, активный run-лог из панели). Возвращает число обрезанных.
+
+def _trim_consumed(path: str, snap_ino, snap_size) -> str:
+    """Обрезать из лог-файла уже отправленную часть (v2.4.4).
+
+    В манифесте бандла для каждого файла лежит снапшот (inode, размер) на
+    момент сборки. После успешного пуша отрезаем от файла ровно snap_size
+    байт — остаётся только то, что дописано ПОСЛЕ сборки бандла. Замена
+    эвристики v2.4.3 «не трогать файлы моложе 5 минут»: свежий cron.log
+    после скана или web.log после рестарта сервиса теперь обрезаются сразу,
+    а не уезжают целиком в следующую выгрузку.
+
+    Безопасность: все писатели открывают логи в append-режиме (RotatingFileHandler
+    bot.log, шелл-редиректы cron.log/web.log/run-*.log), поэтому усечение
+    на месте корректно — следующие записи лягут с нового конца. Если файл
+    пересоздан (ротация/подчистка сменили inode) или неожиданно уменьшился —
+    не трогаем: содержимое уйдёт следующей выгрузкой. Отправляется хвост
+    (TAIL_LINES последних строк); более старое отсекается без доставки.
+
+    Возвращает статус: trimmed | rotated | shrunk | gone | error.
     """
-    import time as _t
-    now = _t.time()
+    try:
+        st = os.stat(path)
+    except OSError:
+        return "gone"
+    if snap_ino is not None and st.st_ino != snap_ino:
+        return "rotated"
+    if snap_size is None or not isinstance(snap_size, int) or snap_size < 0:
+        return "shrunk"   # снапшота нет (старый манифест) — ничего не делаем
+    if st.st_size < snap_size:
+        return "shrunk"
+    try:
+        leftover = b""
+        if st.st_size > snap_size:
+            with open(path, "rb") as f:
+                f.seek(snap_size)
+                leftover = f.read()   # дозаписанное после сборки — сохранить
+        with open(path, "r+b") as f:
+            f.write(leftover)
+            f.truncate()
+        return "trimmed"
+    except OSError:
+        return "error"
+
+
+def _clear_pushed_logs(manifest: dict) -> int:
+    """После успешного пуша: убрать с устройства уже отправленное.
+
+    Логи — точная обрезка по снапшоту сборки (_trim_consumed): остаются
+    только записи, накопившиеся ПОСЛЕ сборки бандла. Ротационные архивы
+    (*.log.1), ставшие пустыми после отправки, удаляются — они больше не
+    растут. Отчёты (имена с таймстампом, write-once) удаляются. Поверх —
+    прун старых run-логов. Возвращает число обрезанных файлов.
+    """
     cleared = 0
+    states = manifest.get("log_state") or {}
     for fname in manifest.get("logs") or []:
         p = os.path.join(paths.LOG_DIR, fname)
-        try:
-            if not os.path.isfile(p) or now - os.path.getmtime(p) < 300:
-                continue
-            with open(p, "w", encoding="utf-8"):
-                pass  # обрезка на месте; append-писатели продолжат с нуля
-            cleared += 1
-        except OSError:
-            pass
+        snap = states.get(fname) or {}
+        status = _trim_consumed(p, snap.get("ino"), snap.get("size"))
+        if status != "trimmed":
+            continue
+        cleared += 1
+        if _is_rotated_archive(fname):
+            try:
+                if os.path.getsize(p) == 0:
+                    os.unlink(p)   # архив отправлен целиком и не растёт
+            except OSError:
+                pass
     for fname in manifest.get("reports") or []:
-        p = os.path.join(paths.REPORTS_DIR, fname)
         try:
-            if os.path.isfile(p) and now - os.path.getmtime(p) >= 300:
-                os.unlink(p)
+            os.unlink(os.path.join(paths.REPORTS_DIR, fname))
         except OSError:
             pass
     # прун старых run-логов (их пишут и cron-проходы с v2.4.3)
@@ -291,8 +354,8 @@ def push_logs(message: str = "") -> dict:
         return result
 
     # успех: локальный буфер чистим — данные теперь в репозитории;
-    # отправленные логи обрезаем, чтобы следующая выгрузка содержала
-    # только новое (старье уже в ветке logs и не должно повторяться)
+    # отправленные логи обрезаем ТОЧНО по снапшоту сборки (v2.4.4), чтобы
+    # следующая выгрузка содержала только новое
     shutil.rmtree(bundle_dir, ignore_errors=True)
     cleared = _clear_pushed_logs(manifest)
     result.update({

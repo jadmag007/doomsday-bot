@@ -189,6 +189,11 @@ main { max-width: 860px; margin: 0 auto; padding: .9rem .75rem; }
   background: linear-gradient(135deg, var(--primary-hi), #c8140a);
   box-shadow: none; color: #fff;
 }
+.btn.gold {
+  background: linear-gradient(135deg, #e8cf5a, var(--gold) 55%, #a8871f);
+  box-shadow: none; color: #241d05; font-weight: 700;
+}
+.btn.gold:disabled { opacity: .6; }
 .actions-row { display: flex; flex-wrap: wrap; gap: .5rem; }
 .running { margin-top: .6rem; font-size: .8rem; color: var(--green); font-family: var(--mono); }
 

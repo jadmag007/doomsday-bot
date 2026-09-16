@@ -195,23 +195,40 @@ def _fmt_ms_deadline(ends_at_ms) -> str:
 
 # ---------------- автообмен (sellItem) ----------------
 
-def _exchange_plan(cfg: dict, resources: list) -> list:
+def _exchange_plan(cfg: dict, resources: list, force_all: bool = False) -> list:
     """Решить, что продавать: [(rid, amount, rule)]. Чистая функция, без API.
 
     Режимы (exchange.rules):
       cap    — продавать, когда склад заполнен на threshold_pct % и больше;
       always — продавать всё сразу, как только количество >= min.
     keep — сколько единиц оставить на складе (0 = продавать всё, как кнопка в игре).
+
+    force_all («собрать всю память», ручное действие из панели): план строится
+    из ВСЕХ байтовых носителей (cassete/floppy/hdd) с amount = текущий склад
+    и keep = 0 — мимо порогов, правил и переключателя exchange.enabled.
+    DDT-ресурсы (uran_pills/u235/ddt_res) в форс-план НЕ входят: их продажа
+    остаётся только на правилах — это премиум-валюта, «всю сразу» её не собирают.
     """
-    ex = cfg.get("exchange") or {}
-    if not ex.get("enabled", True):
-        return []
     from . import game_data
     by_rid = {}
     for r in resources or []:
         rid = r.get("id") or game_data.rid_by_name(r.get("name"))
         if rid:
             by_rid[rid] = r
+    if force_all:
+        plan = []
+        for rid, info in game_data.SELL_INFO.items():
+            if info.get("is_ddt"):
+                continue
+            count = (by_rid.get(rid) or {}).get("current")
+            if count is None or count <= 0:
+                continue
+            plan.append((rid, round(count, 3),
+                         {"rid": rid, "mode": "manual", "keep": 0, "enabled": True}))
+        return plan
+    ex = cfg.get("exchange") or {}
+    if not ex.get("enabled", True):
+        return []
     plan = []
     for rule in ex.get("rules") or []:
         if not isinstance(rule, dict) or not rule.get("enabled", True):
@@ -274,8 +291,12 @@ def _sell_pause(cfg: dict, seed: str) -> None:
     _time.sleep(timing_mod.sell_pause_sec(cfg, seed))
 
 
-async def _auto_exchange(cfg: dict, resources: list, ctx: dict, timeout: int) -> list:
+async def _auto_exchange(cfg: dict, resources: list, ctx: dict, timeout: int,
+                           force_all: bool = False) -> list:
     """Продать ресурсы по правилам через sellItem. Обновляет resources на месте.
+
+    force_all=True — «собрать всю память»: план из всех байтовых носителей
+    (см. _exchange_plan), используется ручной кнопкой панели.
 
     Возвращает список отчётов [{rid, name, requested, amount, proceeds,
     proceeds_real, balance, balance_ru, left, attempts}], либо [] если
@@ -296,7 +317,7 @@ async def _auto_exchange(cfg: dict, resources: list, ctx: dict, timeout: int) ->
     """
     from . import game_data
 
-    plan = _exchange_plan(cfg, resources)
+    plan = _exchange_plan(cfg, resources, force_all=force_all)
     if not plan:
         return []
     reports, errors = [], []
@@ -391,7 +412,8 @@ async def _auto_exchange(cfg: dict, resources: list, ctx: dict, timeout: int) ->
             "left": left, "attempts": attempts,
         })
         partial = (left - keep) >= 1.0 or sold <= 0
-        mode_ru = "при заполнении" if rule.get("mode") == "cap" else "сразу"
+        mode_ru = ("вручную (вся память)" if rule.get("mode") == "manual"
+                   else "при заполнении" if rule.get("mode") == "cap" else "сразу")
         if sold > 0:
             head = f"продано {sold:g}"
             if partial:
@@ -412,7 +434,8 @@ async def _auto_exchange(cfg: dict, resources: list, ctx: dict, timeout: int) ->
     if errors:
         db.event("exchange", "Автообмен: ошибка", "\n".join(errors)[:1000], severity="critical")
         notify_mod.notify_error(cfg, "Автообмен не удался", "\n".join(errors)[:300])
-    if reports and cfg.get("notify", {}).get("events", {}).get("exchange_report", True):
+    if reports and (force_all or cfg.get("notify", {}).get("events", {})
+                    .get("exchange_report", True)):
         lines = []
         for x in reports:
             ln = f"{x['name']} ×{x['amount']:g} → {x['proceeds']} (баланс: {x['balance_ru']})"
@@ -420,7 +443,8 @@ async def _auto_exchange(cfg: dict, resources: list, ctx: dict, timeout: int) ->
             if req is not None and req - amt >= 1:
                 ln += f" — продано меньше запрошенного ({req:g})"
             lines.append(ln)
-        notify_mod.notify(cfg, "exchange_report", "Автообмен выполнен",
+        notify_mod.notify(cfg, "exchange_report",
+                          "Память собрана (вручную)" if force_all else "Автообмен выполнен",
                           "\n".join(lines)[:600], open_game=False)
     return reports
 
@@ -508,9 +532,15 @@ def compute_ddt_eta(resources: list) -> dict:
     return out
 
 
-async def action_scan(cfg: dict) -> dict:
-    """Скан: catch-up чтение чата бота + (если настроено) TMA API состояние ресурсов."""
+async def action_scan(cfg: dict, sell_all: bool = False) -> dict:
+    """Скан: catch-up чтение чата бота + (если настроено) TMA API состояние ресурсов.
+
+    sell_all=True — после скана продать ВСЮ память (байтовые носители)
+    немедленно, мимо правил: так работает кнопка «Собрать всю память».
+    """
     result = {"ok": True, "chat_alerts": [], "resources": [], "notes": []}
+    if sell_all:
+        result["sell_all"] = True
     tma_cfg = cfg.get("tma", {})
     chat_cfg = cfg.get("chat", {})
     client = await tgapi.connect(cfg)
@@ -553,7 +583,8 @@ async def action_scan(cfg: dict) -> dict:
                 # автообмен ПЕРЕД порогами: обменянный склад не должен
                 # порождать уведомление «почти полон»
                 ex_timeout = int(tma_cfg.get("timeout_seconds", 35))
-                ex_report = await _auto_exchange(cfg, resources, ctx, ex_timeout)
+                ex_report = await _auto_exchange(cfg, resources, ctx, ex_timeout,
+                                                 force_all=sell_all)
                 if ex_report:
                     result["exchange"] = ex_report
                 result["resources"] = resources

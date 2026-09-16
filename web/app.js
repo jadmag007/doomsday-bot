@@ -603,14 +603,23 @@ setInterval(() => {
 setInterval(refreshOverview, 30000);
 
 /* ================= действия ================= */
+const ACTION_RU = {
+  "reboot": "Ребут производства", "scan": "Скан", "summary": "Сводка",
+  "exchange": "Обмен по правилам", "sell-all": "Сбор всей памяти",
+  "discover": "Обнаружение API", "check": "Диагностика", "test-notify": "Тест уведомления",
+};
 document.addEventListener("click", async (e) => {
   const btn = e.target.closest("[data-action]");
   if (!btn) return;
   const action = btn.dataset.action;
+  if (action === "sell-all" &&
+      !confirm("Продать ВСЕ носители памяти (кассеты, дискеты, ЖД) сейчас —\nмимо порогов и правил обмена?")) {
+    return;
+  }
   btn.disabled = true;
   try {
     const r = await api("/api/action", { method: "POST", body: { action } });
-    toast(`Действие «${action}» запущено (#${r.run_id})`);
+    toast(`${ACTION_RU[action] || action} запущен (#${r.run_id})`);
     setTimeout(refreshOverview, 1500);
     setTimeout(refreshOverview, 8000);
     if (action === "discover") setTimeout(loadDiscovery, 9000);

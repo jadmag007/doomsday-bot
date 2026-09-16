@@ -399,7 +399,8 @@ class Handler(BaseHTTPRequestHandler):
     def _action(self, cfg):
         body = self._body()
         action = str(body.get("action") or "").strip()
-        allowed = {"reboot", "scan", "summary", "discover", "check", "test-notify", "exchange"}
+        allowed = {"reboot", "scan", "summary", "discover", "check", "test-notify",
+                   "exchange", "sell-all"}
         if action not in allowed:
             return self._send_json({"error": f"неизвестное действие {action!r}"}, 400)
         rid = spawn_action(action)

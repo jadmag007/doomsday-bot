@@ -95,7 +95,8 @@
     <div class="actions-row">
       <button class="btn primary" data-action="reboot">⟳ Ребут производства</button>
       <button class="btn" data-action="scan">🔍 Скан сейчас</button>
-      <button class="btn" data-action="exchange">⇄ Обмен сейчас</button>
+      <button class="btn" data-action="exchange">⇄ Обмен по правилам</button>
+      <button class="btn gold" data-action="sell-all">⇩ Собрать всю память</button>
       <button class="btn" data-action="test-notify">🔔 Тест уведомления</button>
       <button class="btn" data-action="check">✓ Диагностика</button>
     </div>
@@ -156,14 +157,17 @@
     <div class="card-head">
       <div class="card-label">Автообмен <span id="ex-state" class="muted"></span></div>
       <div class="res-tools">
-        <button class="btn small" data-action="exchange">Обменять сейчас</button>
+        <button class="btn small gold" data-action="sell-all">⇩ Собрать всю память</button>
+        <button class="btn small" data-action="exchange">Обмен по правилам</button>
       </div>
     </div>
     <div id="ex-balances" class="ex-balances"></div>
-    <div class="card-sub">Обмен выполняется при каждом скане — те же кнопки, что в игре
-      («Установить» → данные для серверов, «Продать» → DDT). «При заполнении» — продать,
-      когда склад достигнет порога; «Сразу» — продавать всё по мере производства;
-      «оставить» — запас, который не продаётся никогда.</div>
+    <div class="card-sub">«Собрать всю память» — продать все носители (кассеты, дискеты,
+      ЖД) немедленно, мимо порогов и правил. «Обмен по правилам» и сканы продают
+      только то, что разрешают правила ниже («Установить» → данные для серверов,
+      «Продать» → DDT). «При заполнении» — продать, когда склад достигнет порога;
+      «Сразу» — продавать всё по мере производства; «оставить» — запас, который
+      не продаётся никогда.</div>
     <div id="ex-rules" class="ex-rules"></div>
     <div class="res-save-row">
       <label class="check"><input type="checkbox" id="f-ex-enabled" checked> Автообмен включён</label>
