@@ -117,25 +117,29 @@ function renderOverview(o) {
     st.className = "hdr-status " + (o.tma_configured ? "ok" : "err");
   }
 
-  // таймеры (скан переехал в статусбар сверху)
+  // таймеры (скан остался в статусбаре сверху)
   const T = o.timers;
-  // цикл производства (из API игры) + время авто-ребута
-  const F = T.farm_cycle || {}, fEl = $("t-farm");
-  fEl.style.color = "";
+  // «Сервер производства» — как блок в игре: «Осталось: 11ч 10м» / «Статус: 200»,
+  // зелёная полоса цикла; при истёкшем цикле — «Завершено!» / «Статус: 503»
+  const F = T.farm_cycle || {}, fCard = $("farm-card");
+  fCard.classList.remove("done");
   if (!F.known) {
-    fEl.textContent = "--:--:--";
+    $("t-farm").textContent = "Осталось: --";
+    $("t-farm-status").textContent = "Статус: ---";
     $("t-farm-sub").textContent = "нет данных (появится после скана/ребута)";
     $("t-farm-bar").style.width = "0%";
   } else if (F.active) {
-    fEl.textContent = fmtDur(F.left_sec);
+    $("t-farm").textContent = "Осталось: " + fmtLeft(F.left_sec);
+    $("t-farm-status").textContent = "Статус: 200";
     const jit = F.reboot_jitter_sec ? `±${Math.round(F.reboot_jitter_sec / 60)} м` : "";
     $("t-farm-sub").textContent = `конец цикла: ${fmtTs(F.ends_at)}`
       + (F.reboot_at ? ` · авто-ребут ~${fmtClock(F.reboot_at)}${jit ? " " + jit : ""}` : "");
     $("t-farm-bar").style.width = pctOf(F.left_sec, F.total_sec || 12 * 3600);
   } else {
-    fEl.textContent = "истёк";
-    fEl.style.color = "var(--danger)";
-    $("t-farm-sub").textContent = "ребут в ближайший проход cron (до 10 минут)";
+    fCard.classList.add("done");
+    $("t-farm").textContent = "Завершено!";
+    $("t-farm-status").textContent = "Статус: 503";
+    $("t-farm-sub").textContent = "ребут в ближайший проход cron (до 10 минут) или кнопкой «Ребут»";
     $("t-farm-bar").style.width = "100%";
   }
 
@@ -182,6 +186,15 @@ $("stale-restart").addEventListener("click", async () => {
     toast("Не вышло: " + e.message + " — выполните в Termux: doomsday start", true);
   }
 });
+
+/* формат игры для «Осталось» (index-D61wuudv.js): Ue(ms,(h,m)=>`${h}ч ${MM}м`)
+   — часы без ведущего нуля, минуты с паддингом: «11ч 10м», «0ч 45м» */
+function fmtLeft(sec) {
+  if (sec == null || isNaN(sec)) return "--";
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  return `${h}ч ${pad(m)}м`;
+}
 
 function pctOf(leftSec, totalSec) {
   if (leftSec == null || !totalSec) return "0%";
@@ -506,7 +519,7 @@ $("save-res-filter").addEventListener("click", async () => {
 const SELL_DDT_RIDS = () => ((OV && OV.exchange && OV.exchange.sellable) || [])
   .filter(s => s.is_ddt).map(s => s.id);
 
-let DDT_MODE = null;   // режим чипа DDT-ресурса: "eta" | "scan" | null (для тикера)
+let DDT_T = null;      // секунд до продажи DDT-ресурса из ddt_sell (для тикера)
 
 function fmtShort(sec) {
   if (sec == null || isNaN(sec)) return "--:--";
@@ -526,32 +539,8 @@ function fmtGame(sec) {
 
 function renderStatusbar(o) {
   const T = o.timers || {};
-  // ребут производства — формат игры: «Осталось ЧЧ:ММ:СС», затем «Завершено!»
-  const rbChip = $("sb-reboot");
-  if (rbChip) {
-    const F = T.farm_cycle || {};
-    rbChip.classList.remove("hidden", "done", "soon");
-    if (!F.known) {
-      rbChip.classList.add("hidden");
-    } else if (!F.active) {
-      $("sb-reboot-t").textContent = "Завершено!";
-      rbChip.classList.add("done");
-      rbChip.title = "Сервер производства: Завершено! (Статус: 503) — цикл истёк, " +
-        "нужен ребут. Бот ребутнет при первом проходе; вручную — кнопка «Ребут производства».";
-    } else if (F.reboot_in_sec != null && F.reboot_in_sec <= 0) {
-      $("sb-reboot-t").textContent = "ребут…";
-      rbChip.classList.add("soon");
-      rbChip.title = "Окно авто-ребута открылось — ребут в ближайшем проходе cron. " +
-        `Конец цикла: ${fmtTs(F.ends_at) || "?"}.`;
-    } else if (F.reboot_in_sec != null) {
-      $("sb-reboot-t").textContent = fmtGame(F.reboot_in_sec);
-      const jit = F.reboot_jitter_sec ? ` ±${Math.max(1, Math.round(F.reboot_jitter_sec / 60))} м` : "";
-      rbChip.title = `Авто-ребут через ${fmtGame(F.reboot_in_sec)} — за ${F.before_min} мин до конца ` +
-        `цикла (${fmtTs(F.ends_at) || "?"}${jit}). Как в игре: «Осталось».`;
-    } else {
-      rbChip.classList.add("hidden");
-    }
-  }
+  // время ребута в статусбаре убрано (просьба 16.09): оно в карточке
+  // «Сервер производства» на дашборде, в игровом формате
   // скан-таймер (+ здоровье cron: проходы живы?)
   const scanChip = $("sb-scan");
   if (scanChip) {
@@ -583,17 +572,15 @@ function renderStatusbar(o) {
         "Данные о прогрессе появятся после первого скана.";
     }
   }
-  // DDT-продающийся ресурс: голая иконка + «+N time»
+  // DDT-продающийся ресурс: голая иконка + «+N time». N и time — из живой
+  // проекции бекенда (ddt_sell): сколько уйдёт и через сколько первый скан,
+  // на котором выполнится правило обмена. Считается от снимка производства
+  // последнего скана с пересчётом вперёд (fix «+1 00:00:00» из v2.5.0)
   const ddtChip = $("sb-ddt");
-  DDT_MODE = null;
+  DDT_T = null;
   if (ddtChip) {
     const flt = new Set(o.resource_filter || RES_FILTER || []);
-    const eta = o.ddt_eta || {};
     const rids = SELL_DDT_RIDS().filter(rid => flt.has(rid));
-    const byRid = {};
-    (o.resources || []).forEach(r => { if (r.id) byRid[r.id] = r; });
-    const rules = {};
-    (((o.exchange || {}).rules) || []).forEach(x => { rules[x.rid] = x; });
     const sell = {};
     ((o.exchange && o.exchange.sellable) || []).forEach(s => { sell[s.id] = s; });
     if (!rids.length) {
@@ -601,38 +588,25 @@ function renderStatusbar(o) {
     } else {
       ddtChip.classList.remove("hidden");
       const rid = rids[0];  // основной — первый отслеживаемый DDT-ресурс
-      const it = eta[rid] || {};
-      const res = byRid[rid];
-      const rule = rules[rid] || {};
-      const minAmt = Math.max(1, parseInt(rule.min, 10) || 1);
-      const stock = res && res.current != null ? Math.floor(res.current) : 0;
+      const pr = (o.ddt_sell || {})[rid] || {};
+      const ruName = rid === "uran_pills" ? "Урановые таблетки (UO2)"
+        : (sell[rid] ? sell[rid].name : rid);
       $("sb-ddt-img").src = `assets/items/${esc(rid)}.webp`;
       const nEl = $("sb-ddt-n"), tEl = $("sb-ddt-t");
       ddtChip.classList.remove("idle");
-      const ruName = rid === "uran_pills" ? "Урановые таблетки (UO2)"
-        : (sell[rid] ? sell[rid].name : rid);
-      if (stock >= minAmt) {
-        // на складе уже есть что продавать — уйдёт ближайшим сканом (обмен в нём)
-        nEl.textContent = `+${fmtNum(stock)}`;
-        tEl.textContent = fmtShort(T.scan_in_sec);
-        DDT_MODE = "scan";
-        ddtChip.title = `${ruName}: продажа за DDT на ближайшем скане ` +
-          `(через ${fmtShort(T.scan_in_sec)}) — уйдёт ${fmtNum(stock)} шт.`;
-      } else if (it.eta_sec != null) {
-        // пусто — следующая единица произведётся через eta и будет продана
-        nEl.textContent = `+${fmtNum(minAmt)}`;
-        tEl.textContent = fmtGame(it.eta_sec);
-        DDT_MODE = "eta";
-        const jit = (o.security && o.security.jitter_enabled) ? " ~" : "";
-        ddtChip.title = `${ruName}: +${fmtNum(minAmt)} через ${fmtGame(it.eta_sec)}${jit} — ` +
-          `расчёт по доходу входных ресурсов (как в игре: «+N время»).`;
+      if (pr.n != null && pr.t_sec != null) {
+        nEl.textContent = `+${fmtNum(pr.n)}`;
+        tEl.textContent = fmtGame(pr.t_sec);
+        DDT_T = pr.t_sec;
+        ddtChip.title = `${ruName}: продажа за DDT через ${fmtGame(pr.t_sec)} — уйдёт ` +
+          `${fmtNum(pr.n)} шт. Расчёт по производству с последнего скана ` +
+          `(партии по правилам игры), как в игре: «+N время».`;
       } else {
-        nEl.textContent = "+0";
+        nEl.textContent = pr.n != null ? `+${fmtNum(pr.n)}` : "+0";
         tEl.textContent = "";
-        DDT_MODE = null;
         ddtChip.classList.add("idle");
-        ddtChip.title = `${ruName}: ${it.note || "нет данных производства"} — продажа за DDT ` +
-          `состоялась не будет, пока не пойдёт доход входных ресурсов.`;
+        ddtChip.title = `${ruName}: ${pr.note || "нет данных производства"} — ` +
+          `продажа за DDT не прогнозируется.`;
       }
     }
   }
@@ -654,19 +628,12 @@ let TICK = null;
 function armTick(o) {
   const T = o.timers || {};
   const F = T.farm_cycle || {};
-  const eta = (o.ddt_eta || {});
-  const flt = new Set(o.resource_filter || RES_FILTER || []);
-  let ddtEta = null;
-  for (const rid of SELL_DDT_RIDS()) {
-    if (flt.has(rid) && eta[rid] && eta[rid].eta_sec != null) { ddtEta = eta[rid].eta_sec; break; }
-  }
   TICK = {
     at: Date.now(),
     scan: T.scan_in_sec,
     farm: F.active ? F.left_sec : null,
-    ddt: ddtEta,
-    ddtMode: DDT_MODE,
-    reboot: (F.known && F.active && F.reboot_in_sec != null) ? F.reboot_in_sec : null,
+    farmTotal: F.total_sec || 12 * 3600,
+    ddt: DDT_T,
     daily: (o.daily || {}).reset_in_sec,
   };
 }
@@ -677,27 +644,16 @@ setInterval(() => {
   if (TICK.scan != null) { const e = $("sb-scan-t"); if (e) e.textContent = fmtShort(TICK.scan - el); }
   if (TICK.farm != null) {
     const e = $("t-farm");
-    if (e && e.textContent !== "истёк") e.textContent = fmtDur(TICK.farm - el);
-  }
-  if (TICK.reboot != null) {
-    const e = $("sb-reboot-t"), c = $("sb-reboot");
-    if (e) {
-      if (TICK.reboot - el > 0) {
-        if (!c || !c.classList.contains("done")) e.textContent = fmtGame(TICK.reboot - el);
-      } else if (c && !c.classList.contains("done")) {
-        e.textContent = "ребут…";
-        c.classList.add("soon");
-      }
-    }
+    if (e) e.textContent = "Осталось: " + fmtLeft(TICK.farm - el);
+    const bar = $("t-farm-bar");
+    if (bar) bar.style.width = pctOf(TICK.farm - el, TICK.farmTotal);
   }
   if (TICK.daily != null) {
     const e = $("sb-daily-t");
     if (e) e.textContent = fmtGame(TICK.daily - el);
   }
-  if (TICK.ddtMode === "eta" && TICK.ddt != null) {
+  if (TICK.ddt != null) {
     const e = $("sb-ddt-t"); if (e) e.textContent = fmtGame(TICK.ddt - el);
-  } else if (TICK.ddtMode === "scan" && TICK.scan != null) {
-    const e = $("sb-ddt-t"); if (e) e.textContent = fmtShort(TICK.scan - el);
   }
 }, 1000);
 

@@ -133,6 +133,70 @@ main { max-width: 860px; margin: 0 auto; padding: .9rem .75rem; }
 .progress-bar { height: 100%; background: linear-gradient(90deg, #a3140d, var(--primary)); transition: width .5s; }
 .progress-bar.green { background: linear-gradient(90deg, #2c6e37, var(--green)); }
 
+/* ---------- «Сервер производства» — как блок в игре ----------
+   Реверс index-D61wuudv.js: шестерёнка в крутящемся кольце (animate-spin-slow),
+   полоса h-1 perfect-green-300 (#93d29c) на дорожке perfect-green-300/20,
+   «Осталось: 11ч 10м» слева и «Статус: 200» справа (perfect-green-300,
+   при истёкшем цикле — reboot-red «Завершено!»/«Статус: 503», полоса красная).
+   Фон блока — зелёный/красный градиент + лёгкая штриховка (cross-gradient). */
+:root { --pgreen: #93d29c; }
+.farm-card {
+  grid-column: 1 / -1;
+  padding: .8rem .9rem .55rem;
+  background:
+    repeating-linear-gradient(135deg, rgba(217, 255, 255, .025) 0 3px, transparent 3px 10px),
+    linear-gradient(90deg, rgba(147, 210, 156, .09), rgba(17, 42, 21, .28) 48%, rgba(17, 42, 21, .14)),
+    linear-gradient(180deg, #17171c, var(--card));
+  transition: background .4s;
+}
+.farm-card::before { width: 100%; opacity: .6; background: var(--pgreen); }
+.farm-card.done {
+  background:
+    repeating-linear-gradient(135deg, rgba(217, 255, 255, .02) 0 3px, transparent 3px 10px),
+    linear-gradient(90deg, rgba(255, 95, 86, .1), rgba(40, 12, 10, .32) 48%, rgba(40, 12, 10, .16)),
+    linear-gradient(180deg, #1a1416, var(--card));
+}
+.farm-card.done::before { background: var(--primary); }
+.farm-row { display: flex; align-items: center; gap: .85rem; }
+.farm-ico { position: relative; width: 44px; height: 44px; flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center; }
+.farm-ico .farm-ring { position: absolute; inset: 0; width: 100%; height: 100%;
+  color: var(--pgreen); animation: farm-spin 9s linear infinite; }
+.farm-card.done .farm-ico .farm-ring { color: var(--danger); animation: none; }
+.farm-ico .farm-gear { position: relative; width: 23px; height: 23px; color: var(--pgreen);
+  filter: drop-shadow(0 0 5px rgba(147, 210, 156, .35)); }
+.farm-card.done .farm-ico .farm-gear { color: var(--danger);
+  filter: drop-shadow(0 0 5px rgba(255, 95, 86, .4)); }
+@keyframes farm-spin { to { transform: rotate(360deg); } }
+.farm-mid { flex: 1 1 auto; min-width: 0; }
+.farm-title { font-weight: 700; font-size: .92rem; letter-spacing: .07em;
+  text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.farm-bar { height: 4px; margin: .5rem 0 .42rem; background: rgba(147, 210, 156, .2); overflow: hidden; }
+.farm-card.done .farm-bar { background: rgba(255, 95, 86, .18); }
+.farm-bar-fill { height: 100%; background: var(--pgreen); transition: width .6s;
+  box-shadow: 0 0 9px rgba(147, 210, 156, .55); }
+.farm-card.done .farm-bar-fill { background: var(--danger);
+  box-shadow: 0 0 9px rgba(255, 95, 86, .5); }
+.farm-info { display: flex; justify-content: space-between; gap: .6rem;
+  font-family: var(--mono); font-size: .82rem; color: var(--pgreen); white-space: nowrap; }
+.farm-card.done .farm-info { color: var(--danger); }
+.farm-reboot {
+  flex: 0 0 auto; border: none; cursor: pointer; font-family: var(--sans);
+  background: linear-gradient(180deg, #f4f4f7 0%, #d8d8df 46%, #b9b9c5 54%, #a7a7b4 100%);
+  color: #17171c; font-weight: 700; font-size: .9rem; letter-spacing: .07em;
+  text-transform: uppercase; padding: .6rem 1.05rem;
+  clip-path: polygon(9px 0, 100% 0, 100% calc(100% - 9px), calc(100% - 9px) 100%, 0 100%, 0 9px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .9), inset 0 -2px 0 rgba(0, 0, 0, .24),
+    0 2px 7px rgba(0, 0, 0, .5);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, .5);
+}
+.farm-reboot:active { transform: translateY(1px); }
+.farm-reboot:disabled { opacity: .55; }
+@media (max-width: 420px) {
+  .farm-title { font-size: .8rem; }
+  .farm-reboot { padding: .5rem .8rem; font-size: .8rem; }
+}
+
 /* ---------- ресурсы ---------- */
 .resources { display: flex; flex-direction: column; gap: .5rem; }
 .resources.collapsed { display: none; }
@@ -322,15 +386,6 @@ textarea.json-invalid { border-color: var(--danger); }
 .sb-chip.stale { color: var(--danger); border-color: rgba(255, 95, 86, .5); }
 .sb-chip.stale .sb-ico { color: var(--danger); animation: sb-blink 1.2s steps(2) infinite; }
 @keyframes sb-blink { 50% { opacity: .25; } }
-
-/* ребут производства — как в игре: «Осталось ЧЧ:ММ:СС» → «Завершено!» */
-.sb-reboot { color: var(--text); }
-.sb-reboot .sb-ico { color: var(--muted); }
-.sb-reboot.soon { color: var(--gold); border-color: rgba(218, 188, 49, .5); }
-.sb-reboot.soon .sb-ico { color: var(--gold); }
-.sb-reboot.done { color: var(--danger); border-color: rgba(255, 95, 86, .55);
-  animation: sb-blink 1.2s steps(2) infinite; }
-.sb-reboot.done .sb-ico { color: var(--danger); }
 
 /* ежедневный бонус: до полуночи МСК + награда следующего дня */
 .sb-daily-r { color: var(--gold); margin-left: .1rem; }

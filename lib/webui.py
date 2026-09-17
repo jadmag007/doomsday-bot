@@ -17,6 +17,7 @@ import datetime
 import hashlib
 import json
 import logging
+import math
 import os
 import secrets
 import subprocess
@@ -218,6 +219,7 @@ def build_overview(cfg: dict) -> dict:
         "exchange": exchange,
         "security": security,
         "ddt_eta": ddt_eta,
+        "ddt_sell": _ddt_sell_projection(cfg, ddt_eta, next_scan, minutes * 60, now),
         "daily": _daily_info(),
         "running": running or None,
         "events": db.events_list(limit=12),
@@ -493,6 +495,128 @@ def _daily_info() -> dict:
     return out
 
 
+def _ddt_sell_projection(cfg: dict, ddt_eta: dict, next_scan, interval_sec: int,
+                         now) -> dict:
+    """Живая проекция продажи DDT-ресурсов для статусбара («+N time»).
+
+    Снимок производства делает engine.compute_ddt_eta на каждом скане (kv
+    «ddt_eta»). Здесь он ПРОИГРЫВАЕТСЯ ВПЕРЁД до текущего момента — той же
+    моделью, что симуляция клиента игры (production-controller.runProductionMines):
+    партии по workerCount штук завершаются через eta_sec после снимка и далее
+    каждые period_real секунд; склад не выше cap. Затем ищется первый скан
+    (до 48 вперёд, шаг = интервал скана), на котором выполнится правило
+    обмена:
+      always — amount = stock - keep >= min;
+      cap    — плюс заполнение склада >= threshold_pct.
+    Возвращает {rid: {n, t_sec, note}}: n — сколько уйдёт, t_sec — через
+    сколько продажа. Это расчёт «когда тикнет DDT»: v2.5.0 показывал eta
+    из момента скана без пересчёта и парковался на «00:00:00» между
+    часовыми сканами (жалоба 16.09 «стоит 0 часов»).
+    """
+    from . import game_data
+
+    def _num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    rules = {}
+    ex = cfg.get("exchange") or {}
+    if ex.get("enabled", True):
+        for rule in ex.get("rules") or []:
+            if isinstance(rule, dict) and rule.get("enabled", True):
+                rules[str(rule.get("rid") or "")] = rule
+    interval_sec = max(60, int(interval_sec or 3600))
+    out = {}
+    for rid, snap in (ddt_eta or {}).items():
+        if not isinstance(snap, dict):
+            continue
+        if not game_data.SELL_INFO.get(rid, {}).get("is_ddt"):
+            continue
+        item = {"n": None, "t_sec": None, "note": ""}
+        out[rid] = item
+        if snap.get("eta_sec") is None:
+            item["note"] = snap.get("note") or "нет данных производства"
+            continue
+        try:
+            at = datetime.datetime.fromisoformat(str(snap.get("at")))
+        except ValueError:
+            item["note"] = "нет данных производства"
+            continue
+        elapsed = max(0.0, (now - at).total_seconds())
+        stock = _num(snap.get("stock")) or 0.0
+        cap = _num(snap.get("cap"))
+        workers = _num(snap.get("workers")) or 0.0
+        eta = _num(snap.get("eta_sec"))
+        period = _num(snap.get("period_real"))
+        if eta is None or workers <= 0:
+            item["note"] = snap.get("note") or "производство не идёт"
+            continue
+
+        def stock_at(t):
+            """Склад через t сек после снимка (партии уже завершившиеся).
+            period_real=None (стоп входов) — растёт только одна идущая партия."""
+            done = 0
+            if t >= eta:
+                done = (int(math.floor((t - eta) / period)) + 1
+                        if period and period > 0 else 1)
+            s = stock + done * workers
+            return min(s, cap) if cap else s
+
+        rule = rules.get(rid)
+        if rule is None:
+            item["n"] = int(stock_at(elapsed))
+            item["note"] = "нет правила обмена — производится, но не продаётся"
+            continue
+        keep = max(0.0, _num(rule.get("keep")) or 0.0)
+        min_amt = max(0.0, _num(rule.get("min")) or 0.0)
+        threshold = _num(rule.get("threshold_pct"))
+        if threshold is None:
+            threshold = 90.0
+        mode = str(rule.get("mode") or "cap")
+
+        def sells(s):
+            """Сколько уйдёт при складе s (0 — правило не выполнено)."""
+            amount = s - keep
+            if amount <= 0 or amount < min_amt:
+                return 0.0
+            if mode == "cap":
+                if not cap or s / cap * 100.0 < threshold:
+                    return 0.0
+            return amount
+
+        # первый скан, на котором продажа состоится
+        if next_scan is not None:
+            base = (next_scan - at).total_seconds()
+            for k in range(48):
+                t_k = base + k * interval_sec
+                if t_k < elapsed - 1:
+                    continue  # этот скан уже прошёл (снимок старше него)
+                amt = sells(stock_at(t_k))
+                if amt > 0:
+                    item["n"] = round(amt, 3)
+                    item["t_sec"] = max(0.0, t_k - elapsed)
+                    break
+        if item["t_sec"] is None:
+            s_now = stock_at(elapsed)
+            amt = sells(s_now)
+            if amt > 0:
+                item["n"] = round(amt, 3)
+                item["note"] = "скан не запланирован"
+            else:
+                need = keep + min_amt if mode == "always" else (
+                    cap * threshold / 100.0 if cap else None)
+                grows = cap is None or stock < cap
+                hint = f" — нужно ~{int(math.ceil(need))} шт. на складе" if need else ""
+                item["note"] = ("склад заполнен — доход остановился, продажа по правилам"
+                                if not grows else
+                                "по правилам обмена продажа не состоится" + hint)
+                item["n"] = None
+        out[rid] = item
+    return out
+
+
 # Порог «cron молчит»: проходы каждые 10 мин + запас. Если дольше — панель
 # сама запускает проход (cronie мог умереть; после разморозки Android он не
 # всегда оживает, а сервис панели жив и может подстраховать).
@@ -511,6 +635,50 @@ def _fallback_stale_sec(last_cron_iso, now=None) -> float:
     return max(0.0, (now - last).total_seconds())
 
 
+def _kv_dt(key: str):
+    """kv-таймстемп как datetime (None — нет/битое)."""
+    raw = db.kv_get(key)
+    if not raw:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+
+
+def _cycle_end_watch_due(now=None) -> bool:
+    """Точный дожим ребута по концу цикла (диагностика 16.09: цикл истёк в
+    20:44, а резервный проход по 11-минутной сетке добрался только в 20:54 —
+    производство стояло 10 минут; cronie на устройстве почти мёртв, резерв —
+    фактически единственный планировщик).
+
+    True — когда проход нужен СЕЙЧАС, не дожидаясь 11-минутной сетки:
+      * до конца цикла < 2 минут (подстраховка окна ребута), или
+      * цикл истёк, а успешный ребут для него ещё не сделан
+        (last_reboot_ts <= конца цикла). Авральный режим держим 30 минут
+        после конца — дальше что-то сломалось глубже, и спамить процессами
+        бессмысленно (пусть работает обычная сетка и уведомления).
+    Идемпотентно: сам проход всё равно решает через _reboot_due_cycle.
+    """
+    ends_raw = db.kv_get("passive_farm_ends_at")
+    try:
+        ends = float(ends_raw) / 1000.0 if ends_raw else None
+    except (TypeError, ValueError):
+        return False
+    if ends is None:
+        return False
+    now = now or datetime.datetime.now()
+    ts = now.timestamp()
+    if ends - ts > 120:
+        return False  # до конца далеко — окно решает обычная сетка
+    if ts > ends + 30 * 60:
+        return False  # конец давно — авральный режим выключен
+    if ts <= ends:
+        return True   # почти конец — подстраховать точное окно ребута
+    last_reboot = _kv_dt("last_reboot_ts")
+    return not (last_reboot and last_reboot.timestamp() > ends)
+
+
 def _cron_fallback_loop() -> None:
     """Резервный планировщик в процессе веб-панели.
 
@@ -519,32 +687,54 @@ def _cron_fallback_loop() -> None:
     простояло. cronie живёт отдельным процессом и умирает независимо от
     сервиса панели; после оттайки телефона никто его не перезапускает.
     Здесь панель (runit следит за ней и перезапускает при падении) каждые
-    60 секунд смотрит на last_cron_ts: если проходов не видно дольше
+    30 секунд смотрит на last_cron_ts: если проходов не видно дольше
     CRON_FALLBACK_AFTER_SEC — сама запускает `doomsday cron`. Каждый проход
     (в т.ч. резервный и ночной) обновляет last_cron_ts, поэтому при живом
     cronie резерв никогда не срабатывает и дублей не бывает (плюс блокировка
     SingleInstance в самом воркере — неблокирующая, лишний выход мгновенен).
+
+    17.09: добавлен точный дожим по концу цикла (_cycle_end_watch_due) —
+    11-минутная сетка при мёртвом cronie опаздывала к концу цикла на
+    10 минут. Плюс резервные проходы теперь пишут план в cron.log с
+    меткой [fallback] (раньше stdout уходил в /dev/null — диагностика
+    проходила вслепую).
     """
     while True:
-        time.sleep(60)
+        time.sleep(30)
         try:
             cfg = cfgmod.load()
             if not (cfg.get("web") or {}).get("cron_fallback", True):
                 continue
             stale = _fallback_stale_sec(db.kv_get("last_cron_ts"))
-            if stale is not None and stale <= CRON_FALLBACK_AFTER_SEC:
+            due = ((stale is None or stale > CRON_FALLBACK_AFTER_SEC)
+                   or _cycle_end_watch_due())
+            if not due:
                 continue
+            # анти-шторм: что бы ни случилось, не чаще одного спавна в минуту
+            # (если проход умирает до записи last_cron_ts, не плодим процессы)
+            last_spawn = _fallback_stale_sec(db.kv_get("last_cron_fallback_spawn"))
+            if last_spawn is not None and last_spawn < 60:
+                continue
+            db.kv_set("last_cron_fallback_spawn", db.now_iso())
+            env = dict(os.environ, DOOMSDAY_CRON_FALLBACK="1")
+            try:
+                out = open(paths.CRON_LOG_PATH, "a", encoding="utf-8")
+            except OSError:
+                out = subprocess.DEVNULL
             subprocess.Popen(["sh", paths.BIN_DOOMSDAY, "cron"], cwd=paths.APP_DIR,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             stdin=subprocess.DEVNULL, start_new_session=True)
+                             stdout=out, stderr=subprocess.DEVNULL,
+                             stdin=subprocess.DEVNULL, start_new_session=True, env=env)
+            if out is not subprocess.DEVNULL:
+                out.close()
             # событие — не чаще раза в час, чтобы не засорять журнал
             note_age = _fallback_stale_sec(db.kv_get("last_cron_fallback_note"))
             if note_age is None or note_age > 3600:
                 db.kv_set("last_cron_fallback_note", db.now_iso())
+                why = "конец цикла производства" if _cycle_end_watch_due() else "cronie не жив?"
                 db.event("web", "Резервный проход cron",
                          "Проходы cron не видны дольше "
-                         f"{CRON_FALLBACK_AFTER_SEC // 60} мин — панель запустила "
-                         "проход сама (cronie не жив?).")
+                         f"{CRON_FALLBACK_AFTER_SEC // 60} мин либо подошёл конец цикла "
+                         f"({why}) — панель запустила проход сама.")
         except Exception as e:  # поток живёт вечно и не должен падать
             try:
                 log.warning("Резервный планировщик: %s", e)

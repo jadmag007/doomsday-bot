@@ -491,15 +491,21 @@ def _store_daily_state(state: dict) -> None:
 
 
 def compute_ddt_eta(resources: list) -> dict:
-    """Время до следующей единицы каждого DDT-продающегося ресурса.
+    """Снимок производства каждого DDT-продающегося ресурса (для панели).
 
-    Модель по коду игры (progress — СЕКУНДЫ текущего крафта, 0..produceTime):
-      1) реальная скорость craftPerMinuteReal уже учитывает нехватку входов
-         (урана) — ETA = оставшаяся доля единицы / скорость;
-      2) если реальная скорость 0 (добыча входа встала) — считаем по доходу
-         входного ресурса: сколько его не хватает до остатка стоимости единицы;
-      3) нет данных/воркеров — None (в панели «—»).
-    Возвращает {rid: {eta_sec, at, stock, cap, workers, note}} для kv.
+    Модель по коду игры (production-controller + _resourceId из JS-бандла):
+      - юниты производятся ПАРТИЯМИ по workerCount штук каждые productionTime
+        секунд, где productionTime = 60 * workerCount / craftPerMinute
+        (craftPerMinute с сервера УЖЕ учитывает множители фабрики/нейросети);
+      - passive.progress — СЕКУНДЫ, наработанные партией (0..productionTime);
+        интерфейс игры показывает «productionTime - progress»;
+      - при дефиците входов реальный темп задаёт craftPerMinuteReal:
+        period_real = 60 * workerCount / craftPerMinuteReal.
+
+    Панель по снимку строит живую проекцию (webui._ddt_sell_projection):
+    сколько партий завершилось с момента скана и когда следующая продажа.
+    Возвращает {rid: {at, stock, cap, workers, progress, period, period_real,
+    eta_sec, note}} для kv (eta_sec — до первой партии, совместимо с cmd_status).
     """
     from . import game_data
     by_rid = {}
@@ -516,44 +522,69 @@ def compute_ddt_eta(resources: list) -> dict:
         if not row:
             continue
         ci = row.get("craft_info") or {}
-        produce = game_data.produce_time(rid)
         item = {"at": now_iso, "stock": row.get("current"), "cap": row.get("max"),
-                "workers": ci.get("workers"), "eta_sec": None, "note": ""}
-        if not produce or not ci:
+                "workers": ci.get("workers"), "eta_sec": None,
+                "progress": None, "period": None, "period_real": None, "note": ""}
+        if not ci:
             item["note"] = "нет данных производства"
             out[rid] = item
             continue
-        if not ci.get("workers"):
+        workers = float(ci.get("workers") or 0)
+        craft = ci.get("craft")
+        craft_real = ci.get("craft_real")
+        if workers <= 0:
             item["note"] = "производство простаивает"
             out[rid] = item
             continue
-        progress = min(max(float(ci.get("progress") or 0), 0.0), float(produce))
-        remaining_share = 1.0 - progress / float(produce)
-        craft_real = ci.get("craft_real")
-        if craft_real:
-            # реальная скорость (с учётом входов) → ETA текущей единицы
-            item["eta_sec"] = round(remaining_share / float(craft_real) * 60.0)
+        # периоды партии: идеальный (как показывает игра) и реальный (дефицит входов)
+        try:
+            period = 60.0 * workers / float(craft) if craft and craft > 0 else None
+            period_real = (60.0 * workers / float(craft_real)
+                           if craft_real and craft_real > 0 else None)
+        except (TypeError, ValueError, ZeroDivisionError):
+            period = period_real = None
+        item["period"] = round(period, 3) if period else None
+        item["period_real"] = round(period_real, 3) if period_real else None
+        progress = float(ci.get("progress") or 0)
+        item["progress"] = round(progress, 3)
+        if not period and not period_real:
+            item["note"] = "нет данных производства"
+            out[rid] = item
+            continue
+        if period:
+            progress = min(max(progress, 0.0), float(period))
+        # до первой партии (eta_sec). Идущая партия завершается темпом стены —
+        # так работает и клиент игры, и серверный catch-up: progress растёт на
+        # прошедшие секунды; дефицит входов тормозит только СТАРТ следующих
+        # партий (canStartProduction проверяет входы).
+        if period and progress > 0:
+            eta = float(period) - progress
+        elif period and period_real:
+            eta = float(period)          # не начата, входы идут — стартует сразу
+        elif period_real:
+            eta = float(period_real)
         else:
-            # стоп: не хватает входа — по его доходу (для урановых — уран)
-            costs = game_data.craft_cost(rid)
+            # полный стоп: входы не идут — считаем по доходу входного ресурса
             eta = None
+            costs = game_data.craft_cost(rid)
             for in_rid, cnt in costs:
                 in_row = by_rid.get(in_rid)
                 if not in_row:
                     continue
-                need = float(cnt) * remaining_share
+                need = float(cnt)
                 have = float(in_row.get("current") or 0)
                 in_ci = in_row.get("craft_info") or {}
-                in_rate = in_ci.get("craft_real") or 0  # единиц входа в минуту
+                in_rate = in_ci.get("craft_real") or 0
                 if in_rate and in_rate > 0:
                     cand = max(0.0, need - have) / float(in_rate) * 60.0
                     eta = cand if eta is None else max(eta, cand)
                 elif have >= need:
                     cand = 0.0
                     eta = cand if eta is None else max(eta, cand)
-            item["eta_sec"] = round(eta) if eta is not None else None
-            if item["eta_sec"] is None:
+            if eta is None:
                 item["note"] = "нет дохода входных ресурсов"
+        if eta is not None:
+            item["eta_sec"] = round(max(eta, 0.0))
         out[rid] = item
     return out
 

@@ -147,6 +147,11 @@ def _reboot_due_cycle(cfg: dict, now) -> bool:
         return False  # окно ребута ещё не открылось
     # окно открыто (или цикл истёк) — но не чаще, чем разрешает троттлинг ошибок
     retry = int(sch.get("retry_failed_minutes", 20) or 20) * 60
+    # 17.09 (диагностика 16.09 20:44→20:54): цикл истёк, а из-за 20-минутного
+    # троттлинга ошибок ребут откладывался — производство стояло. При истёкшем
+    # цикле каждая минута простоя — потерянный фарм: ретраи каждые 2 минуты.
+    if now.timestamp() > ends_sec:
+        retry = 120
     last_fail = _ts("last_fail_reboot")
     if last_fail is not None and (now - last_fail).total_seconds() < retry:
         return False
@@ -276,7 +281,8 @@ def cmd_cron(args) -> int:
             if _reboot_due_cycle(cfg, datetime.datetime.now()):
                 actions.insert(0, "reboot")
 
-    print(f"[cron] {db.now_iso()} план: {actions or 'ничего не подошло'}")
+    print(f"[cron]{' [fallback]' if os.environ.get('DOOMSDAY_CRON_FALLBACK') else ''} "
+          f"{db.now_iso()} план: {actions or 'ничего не подошло'}")
     for name in actions:
         try:
             r = _run_action_logged(cfg, name)
@@ -974,6 +980,19 @@ def cmd_selftest(args) -> int:
             check("новый цикл после ребута — guard не мешает",
                   lambda: (_reboot_due_cycle(cfg_t, now) is False, ""))
 
+            # 17.09: истёкший цикл — короткий троттлинг ошибок (2 мин вместо 20)
+            db.kv_set("passive_farm_ends_at", ends_ms(-30))
+            db.kv_set("cycle_reboot_guard", None)
+            db.kv_set("last_fail_reboot", db.now_iso())
+            check("истёкший цикл: фейл только что — короткий троттлинг держит",
+                  lambda: (_reboot_due_cycle(cfg_t, datetime.datetime.now()) is False, ""))
+            db.kv_set("last_fail_reboot",
+                      (datetime.datetime.now() - datetime.timedelta(minutes=3))
+                      .isoformat(timespec="seconds"))
+            check("истёкший цикл: фейл 3 мин назад — ретрай разрешён (не 20 мин)",
+                  lambda: (_reboot_due_cycle(cfg_t, datetime.datetime.now()) is True, ""))
+            db.kv_set("last_fail_reboot", None)
+
             db.kv_set("passive_farm_ends_at", None)
             db.kv_set("cycle_reboot_guard", None)
             sent = []
@@ -1127,25 +1146,92 @@ def cmd_selftest(args) -> int:
                 ]
                 eta = engine.compute_ddt_eta(res4)
                 pills = eta.get("uran_pills") or {}
-                # реальная скорость 0.1/ч → полная единица ~10 ч = 36000 с (±округление)
-                check("ETA по реальной скорости (0.1/ч → ~10 ч)",
-                      lambda: (35990 <= (pills.get("eta_sec") or 0) <= 36010,
+                # партия не начата, входы идут → первая партия идеальным темпом
+                # (1/ч → 3600 с, как показывает игра при progress=0);
+                # ДАЛЬНЕЙШИЕ партии — по реальной скорости 0.1/ч → 36000 с
+                check("первая партия — идеальный темп (1/ч → 1 ч)",
+                      lambda: (3590 <= (pills.get("eta_sec") or 0) <= 3610,
                                str(pills.get("eta_sec"))))
+                check("период партий по реальной скорости (0.1/ч → 10 ч)",
+                      lambda: (35990 <= (pills.get("period_real") or 0) <= 36010,
+                               str(pills.get("period_real"))))
+                check("идеальный период = 60*workers/craft",
+                      lambda: (3590 <= (pills.get("period") or 0) <= 3610,
+                               str(pills.get("period"))))
+                # идущая партия завершается темпом стены (progress += elapsed
+                # в runProductionMines) — дефицит тормозит только старт следующих
                 res4[0]["craft_info"] = {"progress": 1800, "craft": 1 / 60.0,
                                          "craft_real": 0, "workers": 1}
                 eta2 = engine.compute_ddt_eta(res4)
                 pills2 = eta2.get("uran_pills") or {}
-                # прогресс 1800/3600 → нужно ещё 420 урана, есть 50, доход 84/ч →
-                # дефицит 370 / 84 ч ≈ 4.4 ч ≈ 15 857 с
-                check("ETA по доходу урана при остановке",
-                      lambda: (15840 <= (pills2.get("eta_sec") or 0) <= 15880,
+                check("идущая партия — темп стены (1800/3600 → 1800 с)",
+                      lambda: (1795 <= (pills2.get("eta_sec") or 0) <= 1805,
                                str(pills2.get("eta_sec"))))
+                check("стоп входов — period_real нет (одна партия)",
+                      lambda: (pills2.get("period_real") is None, ""))
+                # полный стоп, партия не начата: вход (уран) идёт 84/ч, на складе
+                # 50 из 840 → (840-50)/84 ч ≈ 33 857 с
+                res4[0]["craft_info"] = {"progress": 0, "craft": 1 / 60.0,
+                                         "craft_real": 0, "workers": 1}
+                eta2b = engine.compute_ddt_eta(res4)
+                pills2b = eta2b.get("uran_pills") or {}
+                check("полный стоп — ETA по доходу урана (~9.4 ч)",
+                      lambda: (33840 <= (pills2b.get("eta_sec") or 0) <= 33880,
+                               str(pills2b.get("eta_sec"))))
                 res5 = [{"name": "Урановые таблетки", "id": "uran_pills", "current": 0, "max": 24,
                          "state": "", "craft_info": {"progress": 0, "craft": None,
                                                      "craft_real": None, "workers": 0}}]
                 eta3 = engine.compute_ddt_eta(res5)
                 check("простаивает — ETA нет",
                       lambda: ((eta3.get("uran_pills") or {}).get("eta_sec") is None, ""))
+
+                print("selftest: проекция продажи DDT (fix «+1 00:00:00» из v2.5.0)")
+                from . import webui as _webui
+                _now = datetime.datetime.now()
+                _at = _now - datetime.timedelta(minutes=50)   # скан был 50 мин назад
+                _snap = {"at": _at.isoformat(timespec="seconds"), "stock": 3, "cap": 24,
+                         "workers": 1, "progress": 1800.0, "period": 3600.0,
+                         "period_real": 3600.0, "eta_sec": 1800, "note": ""}
+                _cfg_x = {"exchange": {"enabled": True, "rules": [
+                    {"rid": "uran_pills", "mode": "always", "keep": 0, "min": 1,
+                     "enabled": True}]}}
+                _next = _now + datetime.timedelta(minutes=10)
+                _pr = _webui._ddt_sell_projection(_cfg_x, {"uran_pills": _snap},
+                                                  _next, 3600, _now)
+                _it = _pr.get("uran_pills") or {}
+                # срез 50 мин: партия уже тикнула (+1) → скан через 10 мин продаст 4
+                check("проекция: +4 на ближайшем скане (600 с)",
+                      lambda: (_it.get("n") == 4.0 and _it.get("t_sec") == 600.0,
+                               str(_it)))
+                # старый снимок, eta давно истекла (сценарий «стоит 0 часов»)
+                _snap2 = dict(_snap, at=(_now - datetime.timedelta(minutes=80)).isoformat(
+                    timespec="seconds"), stock=0, eta_sec=600, period_real=600.0)
+                _pr2 = _webui._ddt_sell_projection(_cfg_x, {"uran_pills": _snap2},
+                                                   _now + datetime.timedelta(minutes=50),
+                                                   3600, _now)
+                _it2 = _pr2.get("uran_pills") or {}
+                # к скану через 50 мин с 80-го мин при периоде 10 мин будет 13 шт.
+                check("проекция: пересчёт вперёд (13 шт. через 3000 с)",
+                      lambda: (_it2.get("n") == 13.0 and _it2.get("t_sec") == 3000.0,
+                               str(_it2)))
+                # стоп входов: одна партия и продажа на ближайшем скане
+                _snap3 = dict(_snap, at=(_now - datetime.timedelta(minutes=5)).isoformat(
+                    timespec="seconds"), stock=0, eta_sec=5400, period_real=None)
+                _pr3 = _webui._ddt_sell_projection(_cfg_x, {"uran_pills": _snap3},
+                                                   _next, 3600, _now)
+                _it3 = _pr3.get("uran_pills") or {}
+                check("проекция: стоп входов — одна партия (+1)",
+                      lambda: (_it3.get("n") == 1.0, str(_it3)))
+                # правило выключено — продажи нет, n = текущий склад
+                _cfg_off = {"exchange": {"enabled": True, "rules": [
+                    {"rid": "uran_pills", "mode": "always", "keep": 0, "min": 1,
+                     "enabled": False}]}}
+                _pr4 = _webui._ddt_sell_projection(_cfg_off, {"uran_pills": _snap},
+                                                   _next, 3600, _now)
+                _it4 = _pr4.get("uran_pills") or {}
+                check("правило выкл — не продаётся (n=склад, t нет)",
+                      lambda: (_it4.get("t_sec") is None and _it4.get("n") == 4
+                               and "правил" in (_it4.get("note") or ""), str(_it4)))
 
                 print("selftest: обновление панели после ребута (регрессия 15.09 19:15)")
                 # сценарий устройства: цикл истёк, кассета 90.0%, ребут прошёл,
