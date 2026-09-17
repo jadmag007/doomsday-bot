@@ -1,0 +1,151 @@
+{
+  "telegram": {
+    "api_id": 34585776,
+    "api_hash": "75f78a925bd7ee2058ddb5a1cd23144c",
+    "phone": "+79062468202",
+    "session": "doomsday",
+    "game_bot": "@DoomsDayTyrannybot",
+    "app_short_name": "play"
+  },
+  "schedules": {
+    "reboot_interval_hours": 12,
+    "reboot_before_end_minutes": 10,
+    "scan_interval_minutes": 45,
+    "summary_time": "20:00",
+    "retry_failed_minutes": 20
+  },
+  "tma": {
+    "enabled": true,
+    "base_url": "",
+    "timeout_seconds": 25,
+    "steps_reboot": [],
+    "steps_scan": [],
+    "resources": {
+      "json_path": "",
+      "fields": {
+        "name": "name",
+        "current": "amount",
+        "max": "capacity",
+        "state": "state"
+      },
+      "text_patterns": [
+        {
+          "name": "Ресурс",
+          "regex": "([А-Яа-яЁёA-Za-z ]{2,24})[:\\s]+(\\d[\\d\\s.,]*)\\s*/\\s*(\\d[\\d\\s.,]*)",
+          "enabled": true
+        }
+      ]
+    }
+  },
+  "chat": {
+    "read_last_messages": 20,
+    "send_start_on_reboot": true,
+    "parse_patterns": [
+      {
+        "match": "[Сс]клад переполнен",
+        "title": "Склад переполнен",
+        "severity": "warn",
+        "notify": true
+      },
+      {
+        "match": "[Тт]ребуется перезагрузка|ребут",
+        "title": "Требуется перезагрузка",
+        "severity": "warn",
+        "notify": true
+      },
+      {
+        "match": "[Пп]ерегрев",
+        "title": "Перегрев производства",
+        "severity": "info",
+        "notify": false
+      }
+    ]
+  },
+  "notify": {
+    "enabled": true,
+    "warn_threshold_pct": 90,
+    "resource_filter": [
+      "floppy",
+      "hdd",
+      "cassete",
+      "uran_pills"
+    ],
+    "events": {
+      "resource_warn": true,
+      "resource_full": true,
+      "reboot_report": true,
+      "scan_report": false,
+      "exchange_report": true,
+      "errors": true,
+      "daily_summary": true,
+      "chat_alerts": true,
+      "reboot_needed": true
+    },
+    "priority_high": [
+      "resource_full",
+      "errors"
+    ],
+    "open_game_button": true
+  },
+  "web": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "pin": "",
+    "open_on_start": true
+  },
+  "security": {
+    "night_mode": {
+      "enabled": true,
+      "from": "00:00",
+      "to": "07:00"
+    },
+    "jitter": {
+      "enabled": true,
+      "scan_percent": 15,
+      "reboot_seconds": 180,
+      "summary_minutes": 10,
+      "sell_pause": [
+        0.4,
+        1.6
+      ]
+    }
+  },
+  "exchange": {
+    "enabled": true,
+    "rules": [
+      {
+        "rid": "cassete",
+        "mode": "cap",
+        "threshold_pct": 90,
+        "keep": 0,
+        "min": 1,
+        "enabled": true
+      },
+      {
+        "rid": "floppy",
+        "mode": "cap",
+        "threshold_pct": 90,
+        "keep": 0,
+        "min": 1,
+        "enabled": true
+      },
+      {
+        "rid": "hdd",
+        "mode": "cap",
+        "threshold_pct": 75,
+        "keep": 0,
+        "min": 1,
+        "enabled": true
+      },
+      {
+        "rid": "uran_pills",
+        "mode": "always",
+        "threshold_pct": 90,
+        "keep": 0,
+        "min": 1,
+        "enabled": true
+      }
+    ]
+  },
+  "_has_api_hash": true
+}

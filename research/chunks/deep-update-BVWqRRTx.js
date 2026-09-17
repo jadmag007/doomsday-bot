@@ -1,0 +1,1 @@
+function f(u,e,o=!0){let n=u;for(let r=0;r<e.length;r++){const t=e[r];if(r===e.length-1)return[n,t];const i=typeof e[r+1]=="number";if(n[t]==null&&o&&(n[t]=i?[]:{}),n=n[t],n==null||typeof n!="object"&&!Array.isArray(n)){if(!o)return[void 0,void 0];n={}}}return[void 0,void 0]}function c(u,e,o){const[n,r]=f(u,e,!0);if(!n||r===void 0)return;const t=n[r];n[r]=o(t)}export{c as u};

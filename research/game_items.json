@@ -1,0 +1,326 @@
+[
+ {
+  "id": "start_res1",
+  "name": "Сoal",
+  "image": "/assets/items/coal.webp",
+  "craft": "/assets/items/coalCraft.webp"
+ },
+ {
+  "id": "d1",
+  "name": "D1 Scout",
+  "image": "/assets/items/d1.webp",
+  "craft": "/assets/items/d1Craft.webp"
+ },
+ {
+  "id": "alloy1",
+  "name": "Alloy",
+  "image": "/assets/items/alloy1.webp",
+  "craft": "/assets/items/alloy1Craft.webp"
+ },
+ {
+  "id": "start_res2",
+  "name": "D2",
+  "image": "/assets/items/d2.webp",
+  "craft": "/assets/items/d2Craft.webp"
+ },
+ {
+  "id": "aluminum",
+  "name": "Aluminum",
+  "image": "/assets/items/aluminum.webp",
+  "craft": "/assets/items/aluminumCraft.webp"
+ },
+ {
+  "id": "sulfur",
+  "name": "Sulfur",
+  "image": "/assets/items/sulfur.webp",
+  "craft": "/assets/items/sulfurCraft.webp"
+ },
+ {
+  "id": "powder",
+  "name": "Powder",
+  "image": "/assets/items/powder.webp",
+  "craft": "/assets/items/powderCraft.webp"
+ },
+ {
+  "id": "d1k",
+  "name": "D1 KaKamikaze",
+  "image": "/assets/items/d1k.webp",
+  "craft": "/assets/items/d1kCraft.webp"
+ },
+ {
+  "id": "quartz",
+  "name": "Quartz",
+  "image": "/assets/items/quartz.webp",
+  "craft": "/assets/items/quartzCraft.webp"
+ },
+ {
+  "id": "silicon",
+  "name": "Silicon",
+  "image": "/assets/items/silicon.webp",
+  "craft": "/assets/items/siliconCraft.webp"
+ },
+ {
+  "id": "microcircuit1",
+  "name": "Microcircuit",
+  "image": "/assets/items/microcircuit1.webp",
+  "craft": "/assets/items/microcircuit1Craft.webp"
+ },
+ {
+  "id": "d2r2",
+  "name": "D2R2 Builder",
+  "image": "/assets/items/d2r2.webp",
+  "craft": "/assets/items/d2r2Craft.webp"
+ },
+ {
+  "id": "sulfuracid",
+  "name": "Sulfur acid",
+  "image": "/assets/items/sulfuracid.webp",
+  "craft": "/assets/items/sulfuracidCraft.webp"
+ },
+ {
+  "id": "pbacid",
+  "name": "PB-acid",
+  "image": "/assets/items/pbacid.webp",
+  "craft": "/assets/items/pbacidCraft.webp"
+ },
+ {
+  "id": "ammo762",
+  "name": "Ammo 7.62",
+  "image": "/assets/items/ammo762.webp",
+  "craft": "/assets/items/ammo762Craft.webp"
+ },
+ {
+  "id": "minigun",
+  "name": "Minigun",
+  "image": "/assets/items/minigun.webp",
+  "craft": "/assets/items/minigunCraft.webp"
+ },
+ {
+  "id": "t1",
+  "name": "T-1",
+  "image": "/assets/items/t1.webp",
+  "craft": "/assets/items/t1Craft.webp"
+ },
+ {
+  "id": "cassete",
+  "name": "Cassete",
+  "image": "/assets/items/cassette.webp",
+  "craft": "/assets/items/cassetteCraft.webp"
+ },
+ {
+  "id": "floppy",
+  "name": "Floppy-Disk",
+  "image": "/assets/items/floppy.webp",
+  "craft": "/assets/items/floppyCraft.webp"
+ },
+ {
+  "id": "hdd",
+  "name": "HDD",
+  "image": "/assets/items/hdd.webp",
+  "craft": "/assets/items/hddCraft.webp"
+ },
+ {
+  "id": "iron",
+  "name": "Iron",
+  "image": "/assets/items/iron.webp",
+  "craft": "/assets/items/ironCraft.webp"
+ },
+ {
+  "id": "steel",
+  "name": "Steel",
+  "image": "/assets/items/steel.webp",
+  "craft": "/assets/items/steelCraft.webp"
+ },
+ {
+  "id": "aluminum_m2",
+  "name": "Profile aluminum",
+  "image": "/assets/items/aluminum_m2.webp",
+  "craft": "/assets/items/aluminum_m2Craft.webp"
+ },
+ {
+  "id": "cast_iron",
+  "name": "Cast iron",
+  "image": "/assets/items/cast_iron.webp",
+  "craft": "/assets/items/cast_ironCraft.webp"
+ },
+ {
+  "id": "aluminum_m3",
+  "name": "Aircraft aluminum",
+  "image": "/assets/items/aluminum_m3.webp",
+  "craft": "/assets/items/aluminum_m3Craft.webp"
+ },
+ {
+  "id": "t2_builder",
+  "name": "T2 builder",
+  "image": "/assets/items/t2_builder.webp",
+  "craft": "/assets/items/t2_builderCraft.webp"
+ },
+ {
+  "id": "petroleum",
+  "name": "Petroleum",
+  "image": "/assets/items/petroleum.webp",
+  "craft": "/assets/items/petroleumCraft.webp"
+ },
+ {
+  "id": "disel",
+  "name": "Disel",
+  "image": "/assets/items/disel.webp",
+  "craft": "/assets/items/diselCraft.webp"
+ },
+ {
+  "id": "rubber",
+  "name": "Rubber",
+  "image": "/assets/items/rubber.webp",
+  "craft": "/assets/items/rubberCraft.webp"
+ },
+ {
+  "id": "steel_plates",
+  "name": "Steel plates",
+  "image": "/assets/items/steel_plates.webp",
+  "craft": "/assets/items/steel_platesCraft.webp"
+ },
+ {
+  "id": "polymer",
+  "name": "Polymer",
+  "image": "/assets/items/polymer.webp",
+  "craft": "/assets/items/polymerCraft.webp"
+ },
+ {
+  "id": "engine_4213",
+  "name": "Engine-4213",
+  "image": "/assets/items/engine_4213.webp",
+  "craft": "/assets/items/engine_4213Craft.webp"
+ },
+ {
+  "id": "p1_scout",
+  "name": "P1 scout",
+  "image": "/assets/items/p1_scout.webp",
+  "craft": "/assets/items/p1_scoutCraft.webp"
+ },
+ {
+  "id": "tires",
+  "name": "Tires",
+  "image": "/assets/items/tires.webp",
+  "craft": "/assets/items/tiresCraft.webp"
+ },
+ {
+  "id": "chassis_at452",
+  "name": "Chassis at452",
+  "image": "/assets/items/chassis_at452.webp",
+  "craft": "/assets/items/chassis_at452Craft.webp"
+ },
+ {
+  "id": "body_at452",
+  "name": "Body at452",
+  "image": "/assets/items/body_at452.webp",
+  "craft": "/assets/items/body_at452Craft.webp"
+ },
+ {
+  "id": "at452_cargo",
+  "name": "At452 cargo",
+  "image": "/assets/items/at452_cargo.webp",
+  "craft": "/assets/items/at452_cargoCraft.webp"
+ },
+ {
+  "id": "at452_fight",
+  "name": "At452 fight",
+  "image": "/assets/items/at452_fight.webp",
+  "craft": "/assets/items/at452_fightCraft.webp"
+ },
+ {
+  "id": "at452_support",
+  "name": "At452 support",
+  "image": "/assets/items/at452_support.webp",
+  "craft": "/assets/items/at452_supportCraft.webp"
+ },
+ {
+  "id": "uranus",
+  "name": "Uranus",
+  "image": "/assets/items/uranium.webp",
+  "craft": ""
+ },
+ {
+  "id": "nullRes",
+  "name": "nullRes",
+  "image": "/assets/items/nullRes.webp",
+  "craft": ""
+ },
+ {
+  "id": "u235",
+  "name": "U235",
+  "image": "/assets/items/u235.webp",
+  "craft": "/assets/items/u235Craft.webp"
+ },
+ {
+  "id": "uran_pills",
+  "name": "uran pills",
+  "image": "/assets/items/uran_pills.webp",
+  "craft": "/assets/items/uran_pillsCraft.webp"
+ },
+ {
+  "id": "event_res",
+  "name": "event_res",
+  "image": "/assets/items/event_res.webp",
+  "craft": "/assets/items/event_resCraft.webp"
+ },
+ {
+  "id": "ddt_res",
+  "name": "ddt_res",
+  "image": "/assets/items/ddt_res.webp",
+  "craft": "/assets/items/ddt_resCraft.webp"
+ },
+ {
+  "id": "meatrunner",
+  "name": "Meat Runner",
+  "image": "/assets/items/meatrunner.webp",
+  "craft": "/assets/items/meatrunnerCraft.webp"
+ },
+ {
+  "id": "xeon",
+  "name": "Xeon",
+  "image": "/assets/items/xeon.webp",
+  "craft": "/assets/items/xeonCraft.webp"
+ },
+ {
+  "id": "repair_kit",
+  "name": "Repair Kit",
+  "image": "/assets/items/repair_kit.webp",
+  "craft": "/assets/items/repair_kitCraft.webp"
+ },
+ {
+  "id": "components1",
+  "name": "Components 1 lvl",
+  "image": "/assets/items/components1.webp",
+  "craft": "/assets/items/components1Craft.webp"
+ },
+ {
+  "id": "components2",
+  "name": "Components 2 lvl",
+  "image": "/assets/items/components2.webp",
+  "craft": "/assets/items/components2Craft.webp"
+ },
+ {
+  "id": "components3",
+  "name": "Components 3 lvl",
+  "image": "/assets/items/components3.webp",
+  "craft": "/assets/items/components3Craft.webp"
+ },
+ {
+  "id": "cpu20",
+  "name": "CPU 20 NM",
+  "image": "/assets/items/cpu20.webp",
+  "craft": "/assets/items/cpu20Craft.webp"
+ },
+ {
+  "id": "cpu17",
+  "name": "CPU 17 NM",
+  "image": "/assets/items/cpu17.webp",
+  "craft": "/assets/items/cpu17Craft.webp"
+ },
+ {
+  "id": "cpu14",
+  "name": "CPU 14 NM",
+  "image": "/assets/items/cpu14.webp",
+  "craft": "/assets/items/cpu14Craft.webp"
+ }
+]

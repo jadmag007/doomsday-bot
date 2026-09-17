@@ -1,0 +1,1 @@
+const n={icon:"/assets/neuronet/boosters/cpu.webp",chanceInc:15},s={icon:"/assets/neuronet/boosters/gpu.webp",chanceInc:30},e={icon:"/assets/neuronet/boosters/ram.webp",chanceInc:50},c={icon:"/assets/neuronet/boosters/hpc.webp",chanceInc:75},o={icon:"/assets/neuronet/boosters/quant.webp",chanceInc:95},t={cpu:n,gpu:s,ram:e,hpc:c,quant:o};export{t as b};
