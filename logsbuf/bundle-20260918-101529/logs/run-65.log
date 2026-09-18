@@ -1,0 +1,32 @@
+{
+  "ok": true,
+  "steps": [
+    {
+      "name": "initUser",
+      "status": "ok",
+      "detail": "HTTP 200; извлечено: game_state, farm_ends_at, is_premium, balance_coin, balance_mcoin"
+    },
+    {
+      "name": "rebootProduction",
+      "status": "skip",
+      "detail": "цикл уже свежий (до 18.09 09:51) — ребут не нужен"
+    }
+  ],
+  "notes": [],
+  "farm_ends_at": 1789714267036,
+  "cycle_until": "18.09 09:51",
+  "exchange": [
+    {
+      "rid": "uran_pills",
+      "name": "Урановые таблетки",
+      "requested": 1.0,
+      "amount": 1.0,
+      "proceeds": "+1 DDT",
+      "proceeds_real": true,
+      "balance": 14,
+      "balance_ru": "14 DDT",
+      "left": 0,
+      "attempts": 1
+    }
+  ]
+}

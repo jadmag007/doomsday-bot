@@ -1,0 +1,11 @@
+{
+  "time": "2026-09-18T10:15:29",
+  "version": "2.5.1",
+  "python": "3.14.6",
+  "platform": "Android-16-aarch64-64bit",
+  "machine": "localhost",
+  "is_termux": true,
+  "src_head": "4a7ce0bf20d00732d2d0956153d8e939bb15c92f",
+  "src_dirty": false,
+  "origin": "https://github.com/jadmag007/doomsday-bot.git"
+}

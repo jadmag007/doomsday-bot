@@ -1,0 +1,18 @@
+{
+  "ok": true,
+  "steps": [
+    {
+      "name": "initUser",
+      "status": "ok",
+      "detail": "HTTP 200; извлечено: game_state, farm_ends_at, is_premium, balance_coin, balance_mcoin"
+    },
+    {
+      "name": "rebootProduction",
+      "status": "ok",
+      "detail": "HTTP 200; извлечено: reboot_active, reboot_started_at, reboot_ends_at"
+    }
+  ],
+  "notes": [],
+  "farm_ends_at": 1789714267036,
+  "cycle_until": "18.09 09:51"
+}

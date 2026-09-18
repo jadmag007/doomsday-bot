@@ -1,0 +1,365 @@
+{
+  "ok": true,
+  "chat_alerts": [],
+  "resources": [
+    {
+      "name": "Уголь",
+      "current": 487863.0,
+      "max": 488000.0,
+      "pct": 100.0,
+      "state": "",
+      "id": "start_res1",
+      "craft_info": {
+        "progress": 9.514000000000214,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 2034.0
+      }
+    },
+    {
+      "name": "D1 Разведчик",
+      "current": 3000.0,
+      "max": 3000.0,
+      "pct": 100.0,
+      "state": "склад переполнен",
+      "id": "d1",
+      "craft_info": {
+        "progress": 0.0,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 25.0
+      }
+    },
+    {
+      "name": "D2R2 Строитель",
+      "current": 7100.0,
+      "max": 7100.0,
+      "pct": 100.0,
+      "state": "склад переполнен",
+      "id": "d2r2",
+      "craft_info": {
+        "progress": 0.0,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 142.0
+      }
+    },
+    {
+      "name": "Патроны 7,62",
+      "current": 979000.0,
+      "max": 979000.0,
+      "pct": 100.0,
+      "state": "склад переполнен",
+      "id": "ammo762",
+      "craft_info": {
+        "progress": 0.0,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 816.0
+      }
+    },
+    {
+      "name": "Порох",
+      "current": 1843000.0,
+      "max": 1843000.0,
+      "pct": 100.0,
+      "state": "склад переполнен",
+      "id": "powder",
+      "craft_info": {
+        "progress": 0.0,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 5120.0
+      }
+    },
+    {
+      "name": "Сера",
+      "current": 4969000.0,
+      "max": 4969000.0,
+      "pct": 100.0,
+      "state": "склад переполнен",
+      "id": "sulfur",
+      "craft_info": {
+        "progress": 0.0,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 6902.0
+      }
+    },
+    {
+      "name": "Серная кислота",
+      "current": 93000.0,
+      "max": 93000.0,
+      "pct": 100.0,
+      "state": "склад переполнен",
+      "id": "sulfuracid",
+      "craft_info": {
+        "progress": 0.0,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 388.0
+      }
+    },
+    {
+      "name": "Миниган",
+      "current": 4800.0,
+      "max": 4800.0,
+      "pct": 100.0,
+      "state": "склад переполнен",
+      "id": "minigun",
+      "craft_info": {
+        "progress": 0.0,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 160.0
+      }
+    },
+    {
+      "name": "T-1",
+      "current": 2900.0,
+      "max": 2900.0,
+      "pct": 100.0,
+      "state": "склад переполнен",
+      "id": "t1",
+      "craft_info": {
+        "progress": 0.0,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 145.0
+      }
+    },
+    {
+      "name": "PB-кислота",
+      "current": 14000.0,
+      "max": 14000.0,
+      "pct": 100.0,
+      "state": "склад переполнен",
+      "id": "pbacid",
+      "craft_info": {
+        "progress": 0.0,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 140.0
+      }
+    },
+    {
+      "name": "Событийный ресурс",
+      "current": 406.0,
+      "max": 99999.0,
+      "pct": 0.4,
+      "state": "простаивает",
+      "id": "event_res",
+      "craft_info": {
+        "progress": 0.0,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 0
+      }
+    },
+    {
+      "name": "Урановые таблетки",
+      "current": 0,
+      "max": 24.0,
+      "pct": 0.0,
+      "state": "",
+      "id": "uran_pills",
+      "craft_info": {
+        "progress": 0.0,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 1.0
+      }
+    },
+    {
+      "name": "Сплав",
+      "current": 265000.0,
+      "max": 265000.0,
+      "pct": 100.0,
+      "state": "склад переполнен",
+      "id": "alloy1",
+      "craft_info": {
+        "progress": 0.0,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 1105.0
+      }
+    },
+    {
+      "name": "Кассета",
+      "current": 25930.0,
+      "max": 58000.0,
+      "pct": 44.7,
+      "state": "",
+      "id": "cassete",
+      "craft_info": {
+        "progress": 76.51400000000021,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 145.0
+      }
+    },
+    {
+      "name": "Микросхема",
+      "current": 71720.0,
+      "max": 72000.0,
+      "pct": 99.6,
+      "state": "",
+      "id": "microcircuit1",
+      "craft_info": {
+        "progress": 77.51400000000021,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 400.0
+      }
+    },
+    {
+      "name": "Кремний",
+      "current": 518730.0,
+      "max": 521000.0,
+      "pct": 99.6,
+      "state": "",
+      "id": "silicon",
+      "craft_info": {
+        "progress": 11.514000000000214,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 2171.0
+      }
+    },
+    {
+      "name": "Уран",
+      "current": 734.0,
+      "max": 118800.0,
+      "pct": 0.6,
+      "state": "",
+      "id": "uranus",
+      "craft_info": {
+        "progress": 20.514000000000216,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 10.0
+      }
+    },
+    {
+      "name": "Дискета",
+      "current": 24410.0,
+      "max": 31000.0,
+      "pct": 78.7,
+      "state": "",
+      "id": "floppy",
+      "craft_info": {
+        "progress": 35.514000000000216,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 130.0
+      }
+    },
+    {
+      "name": "D2",
+      "current": 11800.0,
+      "max": 11800.0,
+      "pct": 100.0,
+      "state": "склад переполнен",
+      "id": "start_res2",
+      "craft_info": {
+        "progress": 0.0,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 132.0
+      }
+    },
+    {
+      "name": "Жёсткий диск",
+      "current": 7215.0,
+      "max": 11100.0,
+      "pct": 65.0,
+      "state": "",
+      "id": "hdd",
+      "craft_info": {
+        "progress": 83.51400000000021,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 185.0
+      }
+    },
+    {
+      "name": "Кварц",
+      "current": 1065874.0,
+      "max": 1189000.0,
+      "pct": 89.6,
+      "state": "",
+      "id": "quartz",
+      "craft_info": {
+        "progress": 11.514000000000214,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 1982.0
+      }
+    },
+    {
+      "name": "Алюминий",
+      "current": 2039700.0,
+      "max": 2041000.0,
+      "pct": 99.9,
+      "state": "",
+      "id": "aluminum",
+      "craft_info": {
+        "progress": 56.514000000000216,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 5670.0
+      }
+    },
+    {
+      "name": "Мясной бегун",
+      "current": 100.0,
+      "max": 300.0,
+      "pct": 33.3,
+      "state": "",
+      "id": "meatrunner",
+      "craft_info": {
+        "progress": 2111.514,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 10.0
+      }
+    },
+    {
+      "name": "D1 Какамикадзе",
+      "current": 14600.0,
+      "max": 14600.0,
+      "pct": 100.0,
+      "state": "склад переполнен",
+      "id": "d1k",
+      "craft_info": {
+        "progress": 0.0,
+        "craft": 0.0,
+        "craft_real": 0.0,
+        "workers": 163.0
+      }
+    }
+  ],
+  "notes": [],
+  "steps": [
+    {
+      "name": "initUser",
+      "status": "ok",
+      "detail": "HTTP 200; извлечено: game_state, farm_ends_at, is_premium, balance_coin, balance_mcoin"
+    }
+  ],
+  "exchange": [
+    {
+      "rid": "uran_pills",
+      "name": "Урановые таблетки",
+      "requested": 1.0,
+      "amount": 1.0,
+      "proceeds": "+1 DDT",
+      "proceeds_real": true,
+      "balance": 5,
+      "balance_ru": "5 DDT",
+      "left": 0,
+      "attempts": 1
+    }
+  ],
+  "farm_ends_at": 1789671482725
+}
