@@ -463,3 +463,24 @@ Stage Summary:
   logsbuf/<бандл> archive/<бандл> на ветке logs + пуш).
 - Релиз из этой песочницы — только ручным потоком из AGENT-ONBOARDING.md
   (скрипты старой раскладки несовместимы).
+
+---
+Task ID: onboard-20260918-kimi
+Agent: Kimi (внешняя песочница, /mnt/agents/output/project)
+Task: Онбординг по AGENT-ONBOARDING.md из новой сессии/песочницы.
+
+Work Log:
+- Клонирована ветка workspace (be1bdec — уже содержит онбординг-запись
+  Super Z от 2026-09-18) в /mnt/agents/output/project; remote очищен от PAT.
+- Прочитаны PROJECT-MAP.md, MANIFEST.md, конец worklog.md, сверено состояние:
+  VERSION=2.5.1, код в workspace идентичен origin/main (diff по lib/web/bin/
+  boot/service/install.sh/start.sh/VERSION/requirements.txt пуст),
+  скан строки PAT по дереву чистый (возврат grep=1).
+- Приняты правила: рабочая ветка workspace для всего, main только релизы
+  после зелёных тестов, config.json при релизе не синкать, скан PAT перед
+  каждым пушем, токен нигде не хранить/не печатать.
+
+Stage Summary:
+- Рабочая среда готова к приёму задач владельца. Релиз из этой песочницы —
+  ручным потоком (rel-ветка от origin/main + пуш PAT-URL), т.к. release.sh
+  заточен под старую раскладку /home/z/my-project.
